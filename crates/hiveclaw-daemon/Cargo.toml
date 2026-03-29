@@ -1,0 +1,8 @@
+[package]
+name = "hiveclaw-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hiveclaw-backend-metal = { path = "../hiveclaw-backend-metal" }
+hiveclaw-core = { path = "../hiveclaw-core" }

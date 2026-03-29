@@ -1,0 +1,3 @@
+# HiveClaw
+
+Rust workspace for VRAM-native agent coordination. Respect the split between `hiveclaw-core` (shared traits and math), hardware backends under `crates/hiveclaw-backend-*`, and `hiveclaw-daemon` (CLI / process boundary). Prefer workspace path dependencies; keep backend code out of core.

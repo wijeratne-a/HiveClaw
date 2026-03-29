@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hiveclaw-core",
+    "crates/hiveclaw-backend-metal",
+    "crates/hiveclaw-daemon",
+]
