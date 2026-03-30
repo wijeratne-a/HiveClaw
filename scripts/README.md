@@ -1,4 +1,6 @@
-# Intelligence spike (Phase 4)
+# Intelligence spike (Phase 4A)
+
+The script runs **Agent A** (prefill → L2-normalized last-token hidden state) writing a **4096-D bf16 scent** to IOSurface slot 0, then **Agent B** generates with the final layer wrapped to add `alpha * scent` to the last position each step (“active steering”). See `scripts/intelligence_spike.py`.
 
 Activate a venv first, then either install spike deps explicitly or use `make python` (which runs `pip install -r scripts/requirements-spike.txt` before maturin):
 

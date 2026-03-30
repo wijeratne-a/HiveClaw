@@ -2,3 +2,4 @@ mlx-lm
 mlx
 numpy
 psutil
+maturin>=1.0
