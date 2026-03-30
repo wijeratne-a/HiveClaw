@@ -28,11 +28,15 @@ class CaptureWrapper(nn.Module):
 
     def __init__(self, layer):
         super().__init__()
-        self.layer = layer
-        self.captured_h = None
+        # Bypass nn.Module.__setattr__: it uses hasattr(self, key), which triggers __getattr__
+        # before self.layer exists → infinite recursion.
+        object.__setattr__(self, "layer", layer)
+        object.__setattr__(self, "captured_h", None)
 
     def __getattr__(self, name: str):
         # mlx_lm LlamaModel reads e.g. layer.use_sliding when building masks; forward to the block.
+        if name in ("layer", "captured_h"):
+            return super().__getattr__(name)
         try:
             return getattr(self.layer, name)
         except AttributeError:
@@ -40,7 +44,9 @@ class CaptureWrapper(nn.Module):
 
     def __call__(self, *args, **kwargs):
         out = self.layer(*args, **kwargs)
-        self.captured_h = out[0] if isinstance(out, tuple) else out
+        object.__setattr__(
+            self, "captured_h", out[0] if isinstance(out, tuple) else out
+        )
         return out
 
 
@@ -53,11 +59,13 @@ class ActiveSteeringWrapper(nn.Module):
 
     def __init__(self, layer, slab_client, alpha=0.1):
         super().__init__()
-        self.layer = layer
-        self.slab_client = slab_client
-        self.alpha = alpha
+        object.__setattr__(self, "layer", layer)
+        object.__setattr__(self, "slab_client", slab_client)
+        object.__setattr__(self, "alpha", alpha)
 
     def __getattr__(self, name: str):
+        if name in ("layer", "slab_client", "alpha"):
+            return super().__getattr__(name)
         try:
             return getattr(self.layer, name)
         except AttributeError:
