@@ -31,8 +31,9 @@ test-ipc:
 spike-deps:
 	"$(PYTHON)" -m pip install -r "$(ROOT)/scripts/requirements-spike.txt"
 
+# PyO3/maturin: pin interpreter and avoid stale Cargo state from another clone (e.g. CARGO_TARGET_DIR → wrong .venv).
 python: spike-deps
-	cd crates/hiveclaw-python && env -u CONDA_PREFIX -u CONDA_DEFAULT_ENV "$(MATURIN_PYTHON)" -m maturin develop --release
+	cd crates/hiveclaw-python && env -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET PYO3_PYTHON="$(MATURIN_PYTHON)" "$(MATURIN_PYTHON)" -m maturin develop --release
 
 daemon-load: build-release
 	@test -f "$(PBIN)" || (echo "missing $(PBIN); run: cargo build --release -p hiveclaw-daemon" && exit 1)

@@ -31,6 +31,13 @@ class CaptureWrapper(nn.Module):
         self.layer = layer
         self.captured_h = None
 
+    def __getattr__(self, name: str):
+        # mlx_lm LlamaModel reads e.g. layer.use_sliding when building masks; forward to the block.
+        try:
+            return getattr(self.layer, name)
+        except AttributeError:
+            return super().__getattr__(name)
+
     def __call__(self, *args, **kwargs):
         out = self.layer(*args, **kwargs)
         self.captured_h = out[0] if isinstance(out, tuple) else out
@@ -49,6 +56,12 @@ class ActiveSteeringWrapper(nn.Module):
         self.layer = layer
         self.slab_client = slab_client
         self.alpha = alpha
+
+    def __getattr__(self, name: str):
+        try:
+            return getattr(self.layer, name)
+        except AttributeError:
+            return super().__getattr__(name)
 
     def __call__(self, *args, **kwargs):
         out = self.layer(*args, **kwargs)

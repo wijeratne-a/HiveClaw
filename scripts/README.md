@@ -22,6 +22,8 @@ If `make spike-deps` installs into the wrong interpreter, pin it: `make python P
 
 **Conda + venv:** If maturin errors with “Both VIRTUAL_ENV and CONDA_PREFIX are set”, either run `conda deactivate` or rely on the Makefile, which runs maturin with `CONDA_PREFIX` / `CONDA_DEFAULT_ENV` unset.
 
+**Wrong Python / “cross-compilation” / old path in errors:** If `make python` fails mentioning another directory’s `.venv` or “Unsupported Python interpreter for cross-compilation”, your shell may have **`CARGO_TARGET_DIR`** pointing at another checkout’s `target/` (PyO3 then reuses a stale interpreter path). Run `unset CARGO_TARGET_DIR CARGO_BUILD_TARGET`, then `cargo clean -p hiveclaw-python` (or `cargo clean`) in this repo, and use `make python PYTHON=.venv/bin/python3`. The Makefile unsets those variables for the maturin step and sets **`PYO3_PYTHON`** to the same interpreter as **`PYTHON`**.
+
 Alternative without `make python`: `cd crates/hiveclaw-python && maturin develop --release` (still run `pip install -r scripts/requirements-spike.txt` once for NumPy / MLX).
 
 ## Two-terminal run
