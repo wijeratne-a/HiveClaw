@@ -2,7 +2,22 @@
 name = "hiveclaw-daemon"
 version = "0.1.0"
 edition = "2021"
+description = "HiveClaw daemon — IOSurface allocator and IPC (binary: pheromoned)"
+
+[lib]
+name = "hiveclaw_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pheromoned"
+path = "src/main.rs"
 
 [dependencies]
+block2 = "0.5"
 hiveclaw-backend-metal = { path = "../hiveclaw-backend-metal" }
 hiveclaw-core = { path = "../hiveclaw-core" }
+libc = "0.2"
+
+[dev-dependencies]
+half = "2"
+libc = "0.2"

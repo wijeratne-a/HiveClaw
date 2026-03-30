@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 hiveclaw-core = { path = "../hiveclaw-core" }
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+half = "2"
+metal = "0.31"

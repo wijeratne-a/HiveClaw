@@ -1,0 +1,16 @@
+[package]
+name = "hiveclaw-python"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "hiveclaw_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+block2 = "0.5"
+half = "2"
+hiveclaw-backend-metal = { path = "../hiveclaw-backend-metal" }
+hiveclaw-core = { path = "../hiveclaw-core" }
+libc = "0.2"
+pyo3 = { version = "0.22", features = ["extension-module"] }

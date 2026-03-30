@@ -4,4 +4,5 @@ members = [
     "crates/hiveclaw-core",
     "crates/hiveclaw-backend-metal",
     "crates/hiveclaw-daemon",
+    "crates/hiveclaw-python",
 ]
