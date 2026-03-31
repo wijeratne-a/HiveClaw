@@ -148,7 +148,7 @@ fn bounds_end(byte_offset: usize, num_bytes: usize) -> PyResult<usize> {
     Ok(end)
 }
 
-#[pyclass]
+#[pyclass(subclass)]
 pub struct SlabClient {
     /// Fields drop in declaration order: `buf` first (Metal/IOSurface), then `_conn` (XPC invalidates daemon).
     buf: MetalPheromoneBuffer,
@@ -169,6 +169,10 @@ impl SlabClient {
             buf,
             _conn: xpc_conn,
         })
+    }
+
+    pub fn surface_id(&self) -> u32 {
+        self.buf.surface_id()
     }
 
     pub fn write_bf16_at(&mut self, byte_offset: usize, data: Vec<f32>) -> PyResult<()> {
@@ -217,7 +221,7 @@ impl SlabClient {
 unsafe impl Send for SlabClient {}
 
 #[pymodule]
-fn hiveclaw_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SlabClient>()?;
     Ok(())
 }

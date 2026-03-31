@@ -8,5 +8,6 @@ requires-python = ">=3.11"
 dynamic = ["version"]
 
 [tool.maturin]
-module-name = "hiveclaw_python"
+module-name = "hiveclaw_python._core"
+python-source = "python"
 manifest-path = "Cargo.toml"

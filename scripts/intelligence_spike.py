@@ -15,8 +15,8 @@ FATAL_LINE = (
     "`cargo build --release -p hiveclaw-daemon` then `make daemon-load`. See scripts/README.md."
 )
 
-# XPC-backed slab offsets for Phase 4A (must match hiveclaw-core math.rs)
-SLOT0_SCENT_BYTE_OFFSET = 384
+# Phase C: slot-indexed scent (layout in hiveclaw-core math.rs)
+SLOT_INDEX = 0
 SLOT0_SCENT_ELEMS = 4096
 
 
@@ -77,10 +77,12 @@ class ActiveSteeringWrapper(nn.Module):
 
         h_step = h[:, -1:, :]  # (batch, 1, 4096) — only steer last position
 
-        retrieved = self.slab_client.read_bf16_at(
-            SLOT0_SCENT_BYTE_OFFSET, SLOT0_SCENT_ELEMS
+        scent = self.slab_client.read_scent(
+            SLOT_INDEX,
+            [1, 1, SLOT0_SCENT_ELEMS],
+            like=h_step,
+            depends=h_step,
         )
-        scent = mx.array(retrieved, dtype=mx.bfloat16).reshape(1, 1, 4096)
 
         h_modified = h_step + (scent * self.alpha)
 
@@ -132,10 +134,9 @@ def main():
         ).astype(mx.bfloat16)
         normalized_scent = h_prompt_a / (norm + eps)
 
-        scent_list = mx.flatten(normalized_scent).tolist()  # exactly 4096 scalars
-        assert len(scent_list) == 4096
-        slab_client.write_bf16_at(SLOT0_SCENT_BYTE_OFFSET, scent_list)
-        print("[INFO] Agent A wrote 4096-D 'cat' scent to IOSurface.")
+        write_node = slab_client.write_scent(SLOT_INDEX, normalized_scent)
+        mx.eval(write_node)
+        print("[INFO] Agent A wrote 4096-D 'cat' scent to IOSurface (GPU path).")
 
         # ── Agent B: reader ──────────────────────────────
         print("\n=== AGENT B: GENERATING (dog + cat latent pressure) ===")

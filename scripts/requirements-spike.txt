@@ -3,3 +3,6 @@ mlx
 numpy
 psutil
 maturin>=1.0
+cmake>=3.21
+pybind11
+nanobind

@@ -1,4 +1,7 @@
-//! XPC + IOSurface integration test (Phase 4).
+//! XPC + IOSurface integration tests (Phase 4 + Phase C).
+//!
+//! All tests share one `launchd` Mach registration (`com.hiveclaw.pheromoned`) and must not run in
+//! parallel with each other (or with other test binaries that bootstrap the same label).
 
 #[cfg(not(target_os = "macos"))]
 #[test]
@@ -8,15 +11,28 @@ fn ipc_iosurface_skipped_on_non_macos() {}
 mod ipc_macos {
     use half::bf16;
     use hiveclaw_backend_metal::MetalPheromoneBuffer;
-    use hiveclaw_core::math::{SLOT0_SCALAR_BYTE_OFFSET, SLOT0_SCENT_BYTE_OFFSET};
+    use hiveclaw_core::math::{
+        N_SLOTS, OFF_G_ZETA_T, OFF_S_CLAIM_FLAG, OFF_S_LAST_INHIBIT_CLK, OFF_S_LAST_WRITE_CLK,
+        OFF_S_WATCHDOG_FLAGS, SCENT_ELEMS, SLOT0_SCALAR_BYTE_OFFSET, slot_base, slot_payload,
+    };
     use hiveclaw_daemon::xpc::fetch_surface_id;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::ptr;
-    use std::sync::atomic::{fence, Ordering};
+    use std::sync::atomic::{AtomicU32, fence, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    /// Serialize launchd bootstrap across all tests in this binary (same Mach service label).
+    static LAUNCHD_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn launchd_serial_lock() -> std::sync::MutexGuard<'static, ()> {
+        LAUNCHD_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     const LABEL: &str = "com.hiveclaw.pheromoned";
     const POLL_MS: u64 = 100;
@@ -115,6 +131,7 @@ mod ipc_macos {
 
     #[test]
     fn xpc_iosurface_bitwise_roundtrip() {
+        let _serial = launchd_serial_lock();
         if std::env::var("HIVECLAW_SKIP_LAUNCHD_TEST").as_deref() == Ok("1") {
             eprintln!("SKIP ipc: HIVECLAW_SKIP_LAUNCHD_TEST=1 (launchctl unavailable in this environment)");
             return;
@@ -155,19 +172,159 @@ mod ipc_macos {
 
         let a = bf16::from_f32(0.5);
         let b = bf16::from_f32(-0.5);
+        let scent0 = slot_payload(0);
         unsafe {
-            let dst = base.add(SLOT0_SCENT_BYTE_OFFSET) as *mut bf16;
+            let dst = base.add(scent0) as *mut bf16;
             dst.write(a);
             dst.add(1).write(b);
         }
         fence(Ordering::SeqCst);
-        let ga = unsafe { (base.add(SLOT0_SCENT_BYTE_OFFSET) as *const bf16).read() };
+        let ga = unsafe { (base.add(scent0) as *const bf16).read() };
         let gb = unsafe {
-            (base.add(SLOT0_SCENT_BYTE_OFFSET) as *const bf16)
+            (base.add(scent0) as *const bf16)
                 .add(1)
                 .read()
         };
         assert_eq!(ga.to_bits(), a.to_bits());
         assert_eq!(gb.to_bits(), b.to_bits());
+    }
+
+    // ── Phase C (formerly tests/phase_c_test.rs) ─────────────────────────────
+
+    /// Mirrors `InhibitSlab::eval_cpu` layout (validates C++/Rust ABI alignment).
+    unsafe fn cpu_inhibit_slot(base: *mut u8, slot: usize) {
+        assert!(slot < N_SLOTS);
+        let b = base as usize;
+        let sb = slot_base(slot);
+        let claim = (b + sb + OFF_S_CLAIM_FLAG) as *mut AtomicU32;
+        (*claim).store(0, Ordering::Release);
+        let wd = (b + sb + OFF_S_WATCHDOG_FLAGS) as *mut u32;
+        wd.write_volatile(wd.read_volatile() | 0x1);
+        let zeta = (b + OFF_G_ZETA_T) as *const f32;
+        let inh = (b + sb + OFF_S_LAST_INHIBIT_CLK) as *mut f32;
+        inh.write_volatile(zeta.read_volatile());
+        let payload = (b + slot_payload(slot)) as *mut u16;
+        for i in 0..SCENT_ELEMS {
+            payload.add(i).write_volatile(0);
+        }
+    }
+
+    /// Two threads contend on the same IOSurface mapping (same as cross-process atomics on shared
+    /// IOSurface memory).
+    #[test]
+    fn phase_c_claim_flag_atomic_single_winner() {
+        let _serial = launchd_serial_lock();
+        if std::env::var("HIVECLAW_SKIP_LAUNCHD_TEST").as_deref() == Ok("1") {
+            eprintln!("SKIP phase_c: HIVECLAW_SKIP_LAUNCHD_TEST=1");
+            return;
+        }
+
+        let exe = PathBuf::from(env!("CARGO_BIN_EXE_pheromoned"));
+        let _guard = LaunchdGuard::bootstrap(&exe);
+        let id = wait_for_xpc();
+
+        let slab = MetalPheromoneBuffer::from_surface_id(id);
+        let base = slab.base_ptr() as usize;
+        let slot = 6usize;
+        let claim_off = base + slot_base(slot) + OFF_S_CLAIM_FLAG;
+
+        let wins = Arc::new(AtomicU32::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let w = Arc::clone(&wins);
+            let b = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                b.wait();
+                let p = claim_off as *mut AtomicU32;
+                unsafe {
+                    if (*p)
+                        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        w.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+
+        barrier.wait();
+        for h in handles {
+            h.join().expect("join");
+        }
+
+        assert_eq!(
+            wins.load(Ordering::SeqCst),
+            1,
+            "exactly one contender should win the claim CAS"
+        );
+        let held = unsafe { (*(claim_off as *const AtomicU32)).load(Ordering::Acquire) };
+        assert_eq!(held, 1);
+    }
+
+    #[test]
+    fn phase_c_inhibit_correctness_cpu_mirror() {
+        let _serial = launchd_serial_lock();
+        if std::env::var("HIVECLAW_SKIP_LAUNCHD_TEST").as_deref() == Ok("1") {
+            eprintln!("SKIP phase_c: HIVECLAW_SKIP_LAUNCHD_TEST=1");
+            return;
+        }
+
+        let exe = PathBuf::from(env!("CARGO_BIN_EXE_pheromoned"));
+        let _guard = LaunchdGuard::bootstrap(&exe);
+        let id = wait_for_xpc();
+
+        let slab = MetalPheromoneBuffer::from_surface_id(id);
+        let base = slab.base_ptr();
+        let slot = 7usize;
+
+        unsafe {
+            let sb = slot_base(slot);
+            let claim = (base.add(sb + OFF_S_CLAIM_FLAG)) as *mut AtomicU32;
+            (*claim).store(1, Ordering::Release);
+            let payload = (base.add(slot_payload(slot))) as *mut bf16;
+            payload.write(bf16::from_f32(1.25));
+
+            cpu_inhibit_slot(base, slot);
+
+            assert_eq!((*claim).load(Ordering::Acquire), 0);
+            let wd = *((base.add(sb + OFF_S_WATCHDOG_FLAGS)) as *const u32);
+            assert!(wd & 0x1 != 0, "watchdog bit 0 should be set");
+            assert_eq!(payload.read().to_bits(), bf16::from_f32(0.0).to_bits());
+        }
+    }
+
+    #[test]
+    fn phase_c_stale_lock_watchdog_eviction() {
+        let _serial = launchd_serial_lock();
+        if std::env::var("HIVECLAW_SKIP_LAUNCHD_TEST").as_deref() == Ok("1") {
+            eprintln!("SKIP phase_c: HIVECLAW_SKIP_LAUNCHD_TEST=1");
+            return;
+        }
+
+        let exe = PathBuf::from(env!("CARGO_BIN_EXE_pheromoned"));
+        let _guard = LaunchdGuard::bootstrap(&exe);
+        let id = wait_for_xpc();
+
+        let slab = MetalPheromoneBuffer::from_surface_id(id);
+        let base = slab.base_ptr();
+        let slot = 9usize;
+        let hdr = base as usize + slot_base(slot);
+
+        unsafe {
+            let claim_p = (hdr + OFF_S_CLAIM_FLAG) as *mut AtomicU32;
+            (*claim_p).store(1, Ordering::Release);
+            ((hdr + OFF_S_LAST_WRITE_CLK) as *mut f32).write_volatile(0.0);
+        }
+
+        // ~0.051 |Δζ| per 100ms tick; threshold STALE_LOCK_ZETA_DELTA needs many ticks.
+        thread::sleep(Duration::from_millis(3500));
+
+        let claim = unsafe {
+            let claim_p = (hdr + OFF_S_CLAIM_FLAG) as *const AtomicU32;
+            (*claim_p).load(Ordering::Acquire)
+        };
+        assert_eq!(claim, 0, "daemon watchdog should evict stale lock");
     }
 }

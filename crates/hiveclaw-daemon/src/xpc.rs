@@ -2,7 +2,10 @@
 
 use block2::{Block, RcBlock};
 use hiveclaw_backend_metal::MetalPheromoneBuffer;
-use hiveclaw_core::math::SLAB_SIZE;
+use hiveclaw_core::math::{
+    N_SLOTS, OFF_G_DECAY_RATE, OFF_G_MAGIC, OFF_G_N_SLOTS, OFF_G_SLOT_STRIDE, OFF_G_VERSION,
+    OFF_G_ZETA_T, PHASE_C_BYTES, SLAB_MAGIC, SLAB_SIZE, SLAB_VERSION_C, SLOT_STRIDE,
+};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -147,11 +150,30 @@ pub fn fetch_surface_id() -> Result<u32, String> {
 }
 
 /// Daemon entry: IOSurface slab + XPC listener (never returns).
+/// Writes Phase C global header after the slab has been zeroed.
+unsafe fn initialize_global_header(base: *mut u8, decay_rate: f32) {
+    let p = base;
+    (p.add(OFF_G_MAGIC) as *mut u32).write_volatile(SLAB_MAGIC);
+    (p.add(OFF_G_VERSION) as *mut u32).write_volatile(SLAB_VERSION_C);
+    (p.add(OFF_G_N_SLOTS) as *mut u32).write_volatile(N_SLOTS as u32);
+    (p.add(OFF_G_SLOT_STRIDE) as *mut u32).write_volatile(SLOT_STRIDE as u32);
+    (p.add(OFF_G_ZETA_T) as *mut f32).write_volatile(0.0);
+    (p.add(OFF_G_DECAY_RATE) as *mut f32).write_volatile(decay_rate);
+}
+
 pub fn run_pheromoned_daemon() -> ! {
+    assert!(
+        PHASE_C_BYTES <= SLAB_SIZE,
+        "Phase C slab exceeds IOSurface allocation: {PHASE_C_BYTES} > {SLAB_SIZE}"
+    );
+
     let slab = MetalPheromoneBuffer::new();
     let base = slab.base_ptr();
     unsafe {
         ptr::write_bytes(base, 0, SLAB_SIZE);
+        let decay_rate = 0.05_f32;
+        initialize_global_header(base, decay_rate);
+        crate::decay::start_decay_loop(base, 100);
     }
     let surface_id = slab.surface_id();
     let _slab = Box::leak(Box::new(slab));
