@@ -132,7 +132,7 @@ def main():
         norm = mx.linalg.norm(
             h_prompt_a.astype(mx.float32), ord=2, axis=-1, keepdims=True
         ).astype(mx.bfloat16)
-        normalized_scent = h_prompt_a / (norm + eps)
+        normalized_scent = (h_prompt_a / (norm + eps)).astype(mx.bfloat16)
 
         write_node = slab_client.write_scent(SLOT_INDEX, normalized_scent)
         mx.eval(write_node)

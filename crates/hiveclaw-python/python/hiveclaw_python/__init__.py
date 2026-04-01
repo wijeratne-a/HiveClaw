@@ -55,6 +55,11 @@ def _validate_slot_scent(scent: mx.array) -> None:
         )
 
 
+def _shape_list(shape: list) -> list[int]:
+    """list[int] for nanobind → std::vector<int> (tuple is not always accepted)."""
+    return [int(d) for d in shape]
+
+
 class SlabClient(_SlabClientBase):
     def __init__(self):
         super().__init__()
@@ -67,15 +72,21 @@ class SlabClient(_SlabClientBase):
         _validate_slot(slot_index)
         _validate_slot_scent(scent)
         scent_c = mx.contiguous(scent)
-        dep = None if depends is None else depends
-        return self._slab_handle.write_slot(int(slot_index), scent_c, dep)
+        if depends is None:
+            return self._slab_handle.write_slot(int(slot_index), scent_c)
+        return self._slab_handle.write_slot(int(slot_index), scent_c, depends)
 
     def read_scent(
-        self, slot_index: int, shape: list, *, like: mx.array, depends=None
+        self, slot_index: int, shape: list, *, like=None, depends=None
     ) -> mx.array:
         _validate_slot(slot_index)
-        dep = None if depends is None else depends
-        return self._slab_handle.read_slot(int(slot_index), shape, like, dep)
+        st = _shape_list(shape)
+        # `like` is kept for call-site compatibility; slab reads use the default GPU
+        # stream unless `depends` is set (stream is taken from `depends`).
+        _ = like
+        if depends is None:
+            return self._slab_handle.read_slot(int(slot_index), st)
+        return self._slab_handle.read_slot(int(slot_index), st, depends)
 
     def write_scent_at_offset(
         self, byte_offset: int, scent: mx.array, *, depends=None
@@ -83,24 +94,34 @@ class SlabClient(_SlabClientBase):
         """Phase B compatibility: raw byte offset into the IOSurface."""
         _validate_write(byte_offset, scent)
         scent_c = mx.contiguous(scent)
-        dep = None if depends is None else depends
-        return self._slab_handle.write(byte_offset, scent_c, dep)
+        if depends is None:
+            return self._slab_handle.write(byte_offset, scent_c)
+        return self._slab_handle.write(byte_offset, scent_c, depends)
 
     def read_scent_at_offset(
-        self, byte_offset: int, shape: list, *, like: mx.array, depends=None
+        self, byte_offset: int, shape: list, *, like=None, depends=None
     ) -> mx.array:
         """Phase B compatibility: raw byte offset into the IOSurface."""
         _validate_read(byte_offset, shape)
-        dep = None if depends is None else depends
-        return self._slab_handle.read(byte_offset, shape, like, dep)
+        st = _shape_list(shape)
+        _ = like
+        if depends is None:
+            return self._slab_handle.read(byte_offset, st)
+        return self._slab_handle.read(byte_offset, st, depends)
+
+    def get_slot_states(self) -> list:
+        """Best-effort snapshot: [{'claimed': bool, 'owner_id': int}, ...] for 32 slots."""
+        raw = self._slab_handle.get_slot_states()
+        return [{"claimed": bool(c), "owner_id": int(oid)} for c, oid in raw]
 
     def claim_task(self, candidates: mx.array, *, depends=None) -> mx.array:
         """Returns scalar int32: claimed slot index, or -1 on failure."""
         if candidates.dtype != mx.int32:
             raise ValueError(f"candidates must be int32, got {candidates.dtype}")
         agent_id = int(os.getpid()) & 0xFFFFFFFF
-        dep = None if depends is None else depends
-        return self._slab_handle.claim(candidates, agent_id, dep)
+        if depends is None:
+            return self._slab_handle.claim(candidates, agent_id)
+        return self._slab_handle.claim(candidates, agent_id, depends)
 
     def release_task(self, slot_index: int, *, depends=None) -> None:
         """Clear claim_flag on the CPU (call when finished with a held slot)."""
@@ -108,7 +129,10 @@ class SlabClient(_SlabClientBase):
         _ = depends  # ordering: release is synchronous CPU; MLX graph deps not applied here
         self._slab_handle.release_slot(int(slot_index))
 
-    def inhibit(self, slot_index: int, *, depends=None) -> mx.array:
-        agent_id = int(os.getpid()) & 0xFFFFFFFF
-        dep = None if depends is None else depends
-        return self._slab_handle.inhibit(int(slot_index), agent_id, dep)
+    def inhibit(self, slot_index: int, owner_id: int | None = None, *, depends=None) -> mx.array:
+        if owner_id is None:
+            owner_id = int(os.getpid()) & 0xFFFFFFFF
+        aid = int(owner_id) & 0xFFFFFFFF
+        if depends is None:
+            return self._slab_handle.inhibit(int(slot_index), aid)
+        return self._slab_handle.inhibit(int(slot_index), aid, depends)

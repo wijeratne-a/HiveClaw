@@ -29,15 +29,15 @@ static const char* COPY_BF16_MSL = R"(
 using namespace metal;
 
 kernel void copy_bf16(
-    const device bfloat16_t* src [[buffer(0)]],
-    device bfloat16_t* dst [[buffer(1)]],
+    const device uint16_t* src [[buffer(0)]],
+    device uint16_t* dst [[buffer(1)]],
     uint index [[thread_position_in_grid]]) {
   dst[index] = src[index];
 }
 
 kernel void write_slot_scent_bf16(
-    const device bfloat16_t* src [[buffer(0)]],
-    device bfloat16_t* dst [[buffer(1)]],
+    const device uint16_t* src [[buffer(0)]],
+    device uint16_t* dst [[buffer(1)]],
     const device float* zeta_ptr [[buffer(2)]],
     device float* clk_ptr [[buffer(3)]],
     uint idx [[thread_position_in_grid]]) {
@@ -101,19 +101,23 @@ array SlabHandle::write(size_t byte_offset,
 
 array SlabHandle::read_slot(uint32_t slot_index,
                             Shape shape,
-                            array like,
                             std::optional<array> dep) {
     if (slot_index >= HCLW_N_SLOTS) {
         throw std::runtime_error("read_slot: slot_index out of range");
     }
-    return read(slot_payload(slot_index), std::move(shape), std::move(like), std::move(dep));
+    return read(slot_payload(slot_index), std::move(shape), std::move(dep));
 }
 
 array SlabHandle::read(size_t byte_offset,
                        Shape shape,
-                       array like,
                        std::optional<array> dep) {
-    Stream s = like.has_primitive() ? like.primitive().stream() : default_stream(Device::gpu);
+    // Avoid passing Python mlx arrays through nanobind as C++ `array` for a stream hint
+    // (that path can throw std::bad_cast when MLX/nanobind versions diverge). Use the
+    // dependency's stream when present, else the default GPU stream.
+    Stream s = default_stream(Device::gpu);
+    if (dep && dep->has_primitive()) {
+        s = dep->primitive().stream();
+    }
     Shape out_shape = shape;
     auto prim = std::make_shared<ReadSlab>(slab_buf_, byte_offset, std::move(shape), s);
     std::vector<array> inputs;
@@ -130,11 +134,13 @@ array SlabHandle::read(size_t byte_offset,
 WriteSlab::WriteSlab(MTL::Buffer* slab,
                      size_t byte_offset,
                      size_t num_bytes,
-                     Stream s)
+                     Stream s,
+                     uint32_t stamp_slot_index)
     : UnaryPrimitive(s),
       slab_buf_(slab),
       byte_offset_(byte_offset),
-      num_bytes_(num_bytes) {}
+      num_bytes_(num_bytes),
+      stamp_slot_index_(stamp_slot_index) {}
 
 void WriteSlab::eval_cpu(const std::vector<array>& inputs, array& out) {
     auto& in = inputs[0];

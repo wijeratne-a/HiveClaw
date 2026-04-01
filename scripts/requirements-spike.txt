@@ -1,8 +1,11 @@
-mlx-lm
-mlx
+mlx-lm==0.31.1
+# Pin mlx + mlx-metal together; rebuild hiveclaw_mlx_ext after any pip upgrade (see scripts/README.md).
+mlx==0.31.1
+mlx-metal==0.31.1
 numpy
 psutil
 maturin>=1.0
 cmake>=3.21
 pybind11
-nanobind
+# Must match the nanobind version MLX was built with (see mlx CMakeLists FetchContent tag).
+nanobind==2.10.2

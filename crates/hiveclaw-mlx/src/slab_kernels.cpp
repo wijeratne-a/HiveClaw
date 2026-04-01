@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 #include <mlx/allocator.h>
 #include <mlx/backend/metal/device.h>
@@ -70,8 +72,9 @@ kernel void inhibit_slot(
   const uint global_hdr = 128u;
   const uint slot_stride = 8256u;
   uint slot_off = global_hdr + slot_index * slot_stride;
-  device bfloat16_t* payload = (device bfloat16_t*)(base + slot_off + 64u);
-  payload[idx] = (bfloat16_t)0.0f;
+  // MSL has no bfloat16_t; payload is bf16 bits — match CPU path (uint16_t zeros).
+  device ushort* payload = (device ushort*)(base + slot_off + 64u);
+  payload[idx] = 0u;
   if (idx == 0u) {
     device volatile atomic_uint* claim =
         (device volatile atomic_uint*)(base + slot_off);
@@ -336,4 +339,18 @@ void SlabHandle::release_slot(uint32_t slot_index) {
     size_t off = slot_base(slot_index) + OFF_S_CLAIM_FLAG;
     auto* claim = reinterpret_cast<std::atomic<uint32_t>*>(base + off);
     claim->store(0u, std::memory_order_release);
+}
+
+std::vector<std::pair<bool, uint32_t>> SlabHandle::get_slot_states() const {
+    char* base = static_cast<char*>(slab_buf_->contents());
+    std::vector<std::pair<bool, uint32_t>> out;
+    out.reserve(HCLW_N_SLOTS);
+    for (size_t i = 0; i < HCLW_N_SLOTS; ++i) {
+        size_t b = slot_base(i);
+        auto* claim = reinterpret_cast<std::atomic<uint32_t>*>(base + b + OFF_S_CLAIM_FLAG);
+        bool claimed = (claim->load(std::memory_order_relaxed) != 0u);
+        uint32_t owner = *reinterpret_cast<uint32_t*>(base + b + OFF_S_OWNER_ID);
+        out.emplace_back(claimed, owner);
+    }
+    return out;
 }

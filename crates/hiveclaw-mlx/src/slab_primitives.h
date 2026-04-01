@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <mlx/array.h>
@@ -33,12 +34,10 @@ class SlabHandle {
 
     mlx::core::array read(size_t byte_offset,
                           mlx::core::Shape shape,
-                          mlx::core::array like,
                           std::optional<mlx::core::array> dep);
 
     mlx::core::array read_slot(uint32_t slot_index,
                                mlx::core::Shape shape,
-                               mlx::core::array like,
                                std::optional<mlx::core::array> dep);
 
     mlx::core::array claim(mlx::core::array candidate_indices,
@@ -51,6 +50,9 @@ class SlabHandle {
 
     /// CPU: clear claim_flag (call when done with a held slot).
     void release_slot(uint32_t slot_index);
+
+    /// CPU best-effort snapshot: [{claimed, owner_id}, ...] for all 32 slots.
+    std::vector<std::pair<bool, uint32_t>> get_slot_states() const;
 
     MTL::Buffer* raw_buffer() const { return slab_buf_; }
 
@@ -65,7 +67,8 @@ class WriteSlab : public mlx::core::UnaryPrimitive {
     WriteSlab(MTL::Buffer* slab,
               size_t byte_offset,
               size_t num_bytes,
-              mlx::core::Stream s);
+              mlx::core::Stream s,
+              uint32_t stamp_slot_index = 0xFFFFFFFFu);
     void eval_cpu(const std::vector<mlx::core::array>& in, mlx::core::array& out) override;
     void eval_gpu(const std::vector<mlx::core::array>& in, mlx::core::array& out) override;
     std::vector<mlx::core::array> jvp(
