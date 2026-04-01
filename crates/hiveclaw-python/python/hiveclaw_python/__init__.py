@@ -15,7 +15,6 @@ except ImportError as e:  # pragma: no cover
 
 _SLAB_SIZE = 4_718_720
 _N_SLOTS = 32
-_SCENT_ELEMS = 4096
 
 
 def _validate_write(byte_offset: int, scent: mx.array) -> None:
@@ -46,12 +45,12 @@ def _validate_slot(slot_index: int) -> None:
         raise ValueError(f"slot_index must be in [0, {_N_SLOTS}), got {slot_index}")
 
 
-def _validate_slot_scent(scent: mx.array) -> None:
+def _validate_slot_scent(scent: mx.array, expected: int) -> None:
     if scent.dtype != mx.bfloat16:
         raise ValueError(f"scent must be bfloat16, got {scent.dtype}")
-    if scent.size != _SCENT_ELEMS:
+    if scent.size != expected:
         raise ValueError(
-            f"Phase C scent must have {_SCENT_ELEMS} bf16 elements, got {scent.size}"
+            f"Phase C scent must have {expected} bf16 elements, got {scent.size}"
         )
 
 
@@ -65,12 +64,16 @@ class SlabClient(_SlabClientBase):
         super().__init__()
         self._slab_handle = _mlx.SlabHandle(self.surface_id())
 
+    def get_scent_dim(self) -> int:
+        """Number of bf16 elements per Phase C scent slot (compiled `SCENT_ELEMS` in math.rs)."""
+        return int(super().get_scent_dim())
+
     def write_scent(
         self, slot_index: int, scent: mx.array, *, depends=None
     ) -> mx.array:
-        """Write bf16×4096 scent to Phase C slot `slot_index` (stamps last_write_clock)."""
+        """Write bf16 scent vector to Phase C slot `slot_index` (stamps last_write_clock)."""
         _validate_slot(slot_index)
-        _validate_slot_scent(scent)
+        _validate_slot_scent(scent, self.get_scent_dim())
         scent_c = mx.contiguous(scent)
         if depends is None:
             return self._slab_handle.write_slot(int(slot_index), scent_c)

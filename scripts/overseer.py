@@ -22,7 +22,6 @@ FATAL_LINE = (
 )
 
 _N_SLOTS = 32
-_SCENT_ELEMS = 4096
 _K = 5
 
 
@@ -52,13 +51,15 @@ def main() -> None:
         print(FATAL_LINE, file=sys.stderr)
         sys.exit(1)
 
+    d = client.get_scent_dim()
     history: list[collections.deque[np.ndarray]] = [
         collections.deque(maxlen=_K) for _ in range(_N_SLOTS)
     ]
-    like_proto = mx.zeros([_SCENT_ELEMS], dtype=mx.bfloat16)
+    like_proto = mx.zeros([d], dtype=mx.bfloat16)
 
     print(
-        f"[overseer] pid={os.getpid()} tick_ms={tick_ms} var_threshold={var_threshold}",
+        f"[overseer] pid={os.getpid()} scent_dim={d} tick_ms={tick_ms} "
+        f"var_threshold={var_threshold}",
         flush=True,
     )
 
@@ -72,7 +73,7 @@ def main() -> None:
                     continue
 
                 scent_bf16 = client.read_scent(
-                    slot_idx, [_SCENT_ELEMS], like=like_proto
+                    slot_idx, [d], like=like_proto
                 )
                 scent_f32 = scent_bf16.astype(mx.float32)
                 mx.eval(scent_f32)

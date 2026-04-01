@@ -6,11 +6,11 @@ pub const SLAB_SIZE: usize = 4_718_720;
 /// Slot 0: scalar probe region (f32×4) — byte offset from slab base.
 pub const SLOT0_SCALAR_BYTE_OFFSET: usize = 256;
 
-/// Slot 0: scent vector (bf16×4096) — byte offset from slab base.
+/// Slot 0: scent vector (bf16×`SLOT0_SCENT_ELEMS`) — byte offset from slab base.
 pub const SLOT0_SCENT_BYTE_OFFSET: usize = 384;
 
-/// Number of bf16 elements in slot 0 scent.
-pub const SLOT0_SCENT_ELEMS: usize = 4096;
+/// Number of bf16 elements in slot 0 scent (kept in sync with `SCENT_ELEMS`).
+pub const SLOT0_SCENT_ELEMS: usize = 2048;
 
 // ── Phase C layout (concurrent swarm / fluid dynamics) ─────────────────────
 
@@ -19,11 +19,11 @@ pub const SLAB_MAGIC: u32 = 0x4843_4C57;
 pub const SLAB_VERSION_C: u32 = 3;
 pub const GLOBAL_HDR_BYTES: usize = 128;
 pub const SLOT_HDR_BYTES: usize = 64;
-pub const SCENT_ELEMS: usize = 4096;
+pub const SCENT_ELEMS: usize = 2048;
 pub const SCENT_BYTES: usize = SCENT_ELEMS * 2; // bf16
-pub const SLOT_STRIDE: usize = SLOT_HDR_BYTES + SCENT_BYTES; // 8256
+pub const SLOT_STRIDE: usize = SLOT_HDR_BYTES + SCENT_BYTES; // 4160
 pub const N_SLOTS: usize = 32;
-pub const PHASE_C_BYTES: usize = GLOBAL_HDR_BYTES + N_SLOTS * SLOT_STRIDE; // 264_320
+pub const PHASE_C_BYTES: usize = GLOBAL_HDR_BYTES + N_SLOTS * SLOT_STRIDE; // 133_248
 
 /// Byte offsets within GlobalHeader (all u32/f32 = 4B each).
 pub const OFF_G_MAGIC: usize = 0;

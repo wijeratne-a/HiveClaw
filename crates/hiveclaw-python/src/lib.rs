@@ -3,7 +3,7 @@
 use block2::{Block, RcBlock};
 use half::bf16;
 use hiveclaw_backend_metal::MetalPheromoneBuffer;
-use hiveclaw_core::math::SLAB_SIZE;
+use hiveclaw_core::math::{SCENT_ELEMS, SLAB_SIZE};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -215,6 +215,11 @@ impl SlabClient {
             (0..num_elements).map(|i| src.add(i).read().to_f32()).collect()
         };
         Ok(out)
+    }
+
+    /// Number of bf16 elements per Phase C scent slot (matches `SCENT_ELEMS` in `hiveclaw-core`).
+    pub fn get_scent_dim(&self) -> usize {
+        SCENT_ELEMS
     }
 }
 

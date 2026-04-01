@@ -6,7 +6,7 @@ from mlx_lm import load
 from mlx_lm.generate import generate_step
 from mlx_lm.sample_utils import make_sampler
 
-MODEL_ID = "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
+MODEL_ID = "mlx-community/Llama-3.2-1B-Instruct-4bit"
 
 # mlx-lm 0.31+: generate_step uses sampler= instead of temp=.
 _SPIKE_SAMPLER = make_sampler(temp=0.0)
@@ -17,13 +17,11 @@ FATAL_LINE = (
 
 # Phase C: slot-indexed scent (layout in hiveclaw-core math.rs)
 SLOT_INDEX = 0
-SLOT0_SCENT_ELEMS = 4096
 
 
 class CaptureWrapper(nn.Module):
     """
-    Captures the pre-norm hidden state tensor at the model's final transformer layer.
-    Contract: captured_h has shape exactly (batch, seq, 4096).
+    Captures the hidden state tensor at the model's final transformer layer.
     """
 
     def __init__(self, layer):
@@ -57,14 +55,15 @@ class ActiveSteeringWrapper(nn.Module):
     adds alpha * scent to the last token's hidden state, returns modified output.
     """
 
-    def __init__(self, layer, slab_client, alpha=0.1):
+    def __init__(self, layer, slab_client, scent_dim: int, alpha=0.1):
         super().__init__()
         object.__setattr__(self, "layer", layer)
         object.__setattr__(self, "slab_client", slab_client)
+        object.__setattr__(self, "scent_dim", scent_dim)
         object.__setattr__(self, "alpha", alpha)
 
     def __getattr__(self, name: str):
-        if name in ("layer", "slab_client", "alpha"):
+        if name in ("layer", "slab_client", "scent_dim", "alpha"):
             return super().__getattr__(name)
         try:
             return getattr(self.layer, name)
@@ -73,13 +72,14 @@ class ActiveSteeringWrapper(nn.Module):
 
     def __call__(self, *args, **kwargs):
         out = self.layer(*args, **kwargs)
-        h = out[0] if isinstance(out, tuple) else out  # (batch, seq, 4096)
+        h = out[0] if isinstance(out, tuple) else out
+        d = self.scent_dim
 
-        h_step = h[:, -1:, :]  # (batch, 1, 4096) — only steer last position
+        h_step = h[:, -1:, :]  # (batch, 1, D) — only steer last position
 
         scent = self.slab_client.read_scent(
             SLOT_INDEX,
-            [1, 1, SLOT0_SCENT_ELEMS],
+            [1, 1, d],
             like=h_step,
             depends=h_step,
         )
@@ -113,7 +113,17 @@ def main():
         print(FATAL_LINE, file=sys.stderr)
         sys.exit(1)
 
+    d = slab_client.get_scent_dim()
     model, tokenizer = load(MODEL_ID)
+    hidden_size = int(model.model.embed_tokens.weight.shape[-1])
+    if hidden_size != d:
+        print(
+            f"[ERROR] Model hidden size {hidden_size} does not match HiveClaw slab "
+            f"configuration {d}. Recompile the C++ extension.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     original_layer = model.model.layers[-1]
 
     try:
@@ -126,7 +136,7 @@ def main():
         _ = model(prompt_a[None])
         mx.eval(wrapper_a.captured_h)
 
-        h_prompt_a = wrapper_a.captured_h[:, -1:, :]  # (1, 1, 4096)
+        h_prompt_a = wrapper_a.captured_h[:, -1:, :]  # (1, 1, D)
 
         eps = mx.array(1e-7, dtype=mx.bfloat16)
         norm = mx.linalg.norm(
@@ -134,25 +144,28 @@ def main():
         ).astype(mx.bfloat16)
         normalized_scent = (h_prompt_a / (norm + eps)).astype(mx.bfloat16)
 
-        write_node = slab_client.write_scent(SLOT_INDEX, normalized_scent)
+        write_node = slab_client.write_scent(SLOT_INDEX, normalized_scent.reshape(d))
         mx.eval(write_node)
-        print("[INFO] Agent A wrote 4096-D 'cat' scent to IOSurface (GPU path).")
+        print(f"[INFO] Agent A wrote {d}-D 'cat' scent to IOSurface (GPU path).")
 
         # ── Agent B: reader ──────────────────────────────
         print("\n=== AGENT B: GENERATING (dog + cat latent pressure) ===")
         prompt_b = _encode_prompt(tokenizer, "Write a short story about a dog.")
 
         alpha = 0.1  # conservative start; increase if tokens remain unaffected
-        wrapper_b = ActiveSteeringWrapper(original_layer, slab_client, alpha=alpha)
+        wrapper_b = ActiveSteeringWrapper(
+            original_layer, slab_client, scent_dim=d, alpha=alpha
+        )
         model.model.layers[-1] = wrapper_b
 
         print("[Output]: ", end="", flush=True)
+        eos_id = int(tokenizer.eos_token_id) if tokenizer.eos_token_id is not None else -1
         for token, _logprob in generate_step(
             prompt_b, model, sampler=_SPIKE_SAMPLER, max_tokens=150
         ):
             tok_id = int(token.item()) if hasattr(token, "item") else int(token)
             print(tokenizer.decode([tok_id]), end="", flush=True)
-            if tok_id == int(tokenizer.eos_token_id):
+            if eos_id >= 0 and tok_id == eos_id:
                 break
         print("\n")
 

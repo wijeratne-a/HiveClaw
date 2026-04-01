@@ -14,7 +14,26 @@ cd ~/dev/HiveClaw
 
 ---
 
-The script runs **Agent A** (prefill → L2-normalized last-token hidden state) writing a **4096-D bf16 scent** to IOSurface slot 0, then **Agent B** generates with the final layer wrapped to add `alpha * scent` to the last position each step (“active steering”). See `scripts/intelligence_spike.py`.
+### Phase C scent dimension (`get_scent_dim`)
+
+Phase C slot scents are **bf16 vectors** whose length is **`SCENT_ELEMS`** in [`crates/hiveclaw-core/src/math.rs`](../crates/hiveclaw-core/src/math.rs) (currently **2048**, aligned with **Llama 3.2 1B** hidden size). At runtime, Python calls **`SlabClient.get_scent_dim()`** (compiled into the PyO3 extension) so scripts never hardcode the width.
+
+**Any edit to `math.rs` (especially `SCENT_ELEMS`) is a breaking layout change.** You **must** rebuild everything and restart the daemon or Python and `pheromoned` will disagree on IOSurface layout:
+
+```bash
+cd ~/dev/HiveClaw
+source .venv/bin/activate
+make python-clean
+make python PYTHON="$(pwd)/.venv/bin/python3"
+cargo build --release -p hiveclaw-daemon
+make daemon-unload   # if loaded
+make daemon-load
+make daemon-status
+```
+
+---
+
+The script runs **Agent A** (prefill → L2-normalized last-token hidden state) writing an **L2-normalized bf16 scent** (length = `get_scent_dim()`, 2048 for the default 1B model) to IOSurface slot 0, then **Agent B** generates with the final layer wrapped to add `alpha * scent` to the last position each step (“active steering”). See `scripts/intelligence_spike.py`.
 
 ### 1. Environment reset (Conda off)
 
@@ -172,3 +191,53 @@ python scripts/overseer.py
 ```
 
 Each `swarm_spike.py` instance races to claim slab slots, runs synthetic matmul FLOPs while holding the lock, then blends slot scent toward a random goal. `overseer.py` inhibits any slot whose geometry freezes (mean per-dimension variance &lt; 1e-5 over the last 5 ticks).
+
+## LLM swarm integration (`scripts/llm_swarm.py`)
+
+Multi-process test: **real** `mlx_lm` generation (default **`mlx-community/Llama-3.2-1B-Instruct-4bit`**) plus slab **sense → claim → generate (≤10 tokens) → write post-steer scent → release**. Each agent uses a **static goal vector** from a one-time prefill on its initial prompt; cosine pressure ranks unclaimed slots. **`--alpha`** tunes steering (default `0.1`). On EOS before 10 tokens, the agent picks a new prompt from a built-in pool.
+
+**Requirements:** Mac + Apple Silicon + GPU + `pheromoned` under launchd (no headless mock). **`model.config` hidden size must equal `get_scent_dim()`** or the script exits with a clear error.
+
+### Four-terminal live integration test
+
+1. **Terminal 1** — daemon (after full rebuild if you changed `math.rs`):
+
+   ```bash
+   cd ~/dev/HiveClaw
+   cargo build --release -p hiveclaw-daemon
+   make daemon-load
+   make daemon-status
+   ```
+
+2. **Terminal 2** — entropy overseer:
+
+   ```bash
+   cd ~/dev/HiveClaw
+   source .venv/bin/activate
+   python scripts/overseer.py
+   ```
+
+3. **Terminals 3–5** — LLM agents (use different `--prompt` strings per terminal):
+
+   ```bash
+   cd ~/dev/HiveClaw
+   source .venv/bin/activate
+   python scripts/llm_swarm.py --prompt "Tell a story about a dog."
+   ```
+
+   ```bash
+   python scripts/llm_swarm.py --prompt "Write a poem about space."
+   ```
+
+   ```bash
+   python scripts/llm_swarm.py --prompt "Explain quantum physics in simple terms."
+   ```
+
+### Action 5 observation checklist
+
+- [ ] **Contention:** Agents sometimes sleep/retry when they cannot claim a slot.
+- [ ] **Generation:** Each agent streams text to stdout in bursts (up to 10 tokens per hold).
+- [ ] **Steering:** Narratives may drift as slots exchange blended hidden-state scents.
+- [ ] **Immune system:** With default overseer timing (~500 ms × 5 samples), killing an agent mid-hold (**Ctrl+C**, no cleanup handler) should eventually lead to **`INHIBIT`** on that slot as variance collapses.
+
+Do not merge the feature branch to `main` until this checklist is green in your environment.

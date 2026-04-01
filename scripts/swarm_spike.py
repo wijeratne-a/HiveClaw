@@ -23,7 +23,6 @@ FATAL_LINE = (
 )
 
 _N_SLOTS = 32
-_SCENT_ELEMS = 4096
 
 
 def _chaos_seed() -> int:
@@ -31,7 +30,7 @@ def _chaos_seed() -> int:
 
 
 def _cosine_read_np(vec_bf16_1d: mx.array, goal_f32_1d: np.ndarray) -> float:
-    """vec_bf16_1d shape [4096]; goal_f32_1d shape [4096] float32."""
+    """vec_bf16_1d flat [D] bf16; goal_f32_1d flat [D] float32."""
     v = np.array(vec_bf16_1d.astype(mx.float32), dtype=np.float64)
     g = goal_f32_1d.astype(np.float64)
     nv = np.linalg.norm(v)
@@ -92,28 +91,30 @@ def main() -> None:
         print(FATAL_LINE, file=sys.stderr)
         sys.exit(1)
 
-    like_bf16 = mx.zeros([_SCENT_ELEMS], dtype=mx.bfloat16)
+    d = client.get_scent_dim()
+    inner = max(1, d // 4)
+    like_bf16 = mx.zeros([d], dtype=mx.bfloat16)
 
-    # Random normalized goal bf16 [1, 1, 4096]
-    g = rng.standard_normal(_SCENT_ELEMS, dtype=np.float32)
+    # Random normalized goal bf16 [1, 1, D]
+    g = rng.standard_normal(d, dtype=np.float32)
     g /= float(np.linalg.norm(g) + 1e-7)
-    goal = mx.array(g.reshape(1, 1, _SCENT_ELEMS), dtype=mx.bfloat16)
+    goal = mx.array(g.reshape(1, 1, d), dtype=mx.bfloat16)
     goal_f32_1d = g.copy()
 
-    # Fixed MLP-ish geometry: W [4096, 1024], V [1024, 4096] float32
+    # Fixed MLP-ish geometry: W [D, D//4], V [D//4, D] float32
     W = mx.array(
-        rng.standard_normal((4096, 1024), dtype=np.float32),
+        rng.standard_normal((d, inner), dtype=np.float32),
         dtype=mx.float32,
     )
     V = mx.array(
-        rng.standard_normal((1024, 4096), dtype=np.float32),
+        rng.standard_normal((inner, d), dtype=np.float32),
         dtype=mx.float32,
     )
     mx.eval(goal, W, V)
 
     print(
-        f"[swarm_spike] pid={os.getpid()} alpha={alpha} hold_steps={hold_steps} "
-        f"seed={seed & 0xFFFFFFFFFFFFFFFF:x}",
+        f"[swarm_spike] pid={os.getpid()} scent_dim={d} alpha={alpha} "
+        f"hold_steps={hold_steps} seed={seed & 0xFFFFFFFFFFFFFFFF:x}",
         flush=True,
     )
 
@@ -128,7 +129,7 @@ def main() -> None:
 
             scored: list[tuple[float, int]] = []
             for slot in unclaimed:
-                read_n = client.read_scent(slot, [_SCENT_ELEMS], like=like_bf16)
+                read_n = client.read_scent(slot, [d], like=like_bf16)
                 mx.eval(read_n)
                 cos = _cosine_read_np(read_n, goal_f32_1d)
                 scored.append((cos, slot))
@@ -143,9 +144,9 @@ def main() -> None:
                 time.sleep(random.uniform(0.001, 0.010))
                 continue
 
-            slot_scent = client.read_scent(slot, [_SCENT_ELEMS], like=like_bf16)
+            slot_scent = client.read_scent(slot, [d], like=like_bf16)
             mx.eval(slot_scent)
-            slot_bf16_3d = slot_scent.reshape(1, 1, _SCENT_ELEMS)
+            slot_bf16_3d = slot_scent.reshape(1, 1, d)
             h = slot_bf16_3d.astype(mx.float32)
             for _ in range(hold_steps):
                 h = (h @ W) @ V
@@ -153,7 +154,7 @@ def main() -> None:
             mx.eval(h_bf16)
 
             blend = alpha * slot_bf16_3d + (1.0 - alpha) * goal
-            to_write = blend.reshape(_SCENT_ELEMS).astype(mx.bfloat16)
+            to_write = blend.reshape(d).astype(mx.bfloat16)
             write_res = client.write_scent(slot, to_write)
             mx.eval(write_res)
             client.release_task(slot)

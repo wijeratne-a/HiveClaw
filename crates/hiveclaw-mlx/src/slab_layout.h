@@ -7,9 +7,9 @@ constexpr uint32_t HCLW_MAGIC = 0x48434C57u;
 constexpr uint32_t HCLW_VERSION_C = 3u;
 constexpr size_t HCLW_GLOBAL_HDR = 128;
 constexpr size_t HCLW_SLOT_HDR = 64;
-constexpr size_t HCLW_SCENT_ELEMS = 4096;
+constexpr size_t HCLW_SCENT_ELEMS = 2048;
 constexpr size_t HCLW_SCENT_BYTES = HCLW_SCENT_ELEMS * 2; // bf16
-constexpr size_t HCLW_SLOT_STRIDE = HCLW_SLOT_HDR + HCLW_SCENT_BYTES; // 8256
+constexpr size_t HCLW_SLOT_STRIDE = HCLW_SLOT_HDR + HCLW_SCENT_BYTES; // 4160
 constexpr size_t HCLW_N_SLOTS = 32;
 
 // Global header field offsets

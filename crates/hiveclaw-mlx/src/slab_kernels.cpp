@@ -41,7 +41,7 @@ kernel void claim_slab_task(
   device uchar* base = (device uchar*)slab_base;
   out_idx[0] = -1;
   const uint global_hdr = 128u;
-  const uint slot_stride = 8256u;
+  const uint slot_stride = 4160u;
   const int nslots = 32;
   for (uint i = 0u; i < k; i++) {
     int s = candidates[i];
@@ -70,7 +70,7 @@ kernel void inhibit_slot(
   (void)agent_id;
   device uchar* base = (device uchar*)slab_base;
   const uint global_hdr = 128u;
-  const uint slot_stride = 8256u;
+  const uint slot_stride = 4160u;
   uint slot_off = global_hdr + slot_index * slot_stride;
   // MSL has no bfloat16_t; payload is bf16 bits — match CPU path (uint16_t zeros).
   device ushort* payload = (device ushort*)(base + slot_off + 64u);
