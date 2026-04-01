@@ -196,7 +196,7 @@ Each `swarm_spike.py` instance races to claim slab slots, runs synthetic matmul 
 
 Multi-process test: **real** `mlx_lm` generation (default **`mlx-community/Llama-3.2-1B-Instruct-4bit`**) plus slab **sense → claim → generate (≤10 tokens) → write post-steer scent → release**. Each agent uses a **static goal vector** from a one-time prefill on its initial prompt; cosine pressure ranks unclaimed slots. **`--alpha`** tunes steering (default `0.1`). On EOS before 10 tokens, the agent picks a new prompt from a built-in pool.
 
-**Requirements:** Mac + Apple Silicon + GPU + `pheromoned` under launchd (no headless mock). **`model.config` hidden size must equal `get_scent_dim()`** or the script exits with a clear error.
+**Requirements:** Mac + Apple Silicon + GPU + `pheromoned` under launchd (no headless mock). The model’s **`hidden_size` from `config.json`** (via `mlx_lm.load(..., return_config=True)`) must equal **`get_scent_dim()`** — do not use quantized `embed_tokens.weight` shape, which can misreport (e.g. 256 vs 2048).
 
 ### Four-terminal live integration test
 

@@ -94,6 +94,18 @@ class ActiveSteeringWrapper(nn.Module):
         return (h_final,) + out[1:] if isinstance(out, tuple) else h_final
 
 
+def _config_hidden_size(config: dict) -> int:
+    """Architectural hidden size from Hugging Face config.json (not embedding weight shape)."""
+    if "hidden_size" in config:
+        return int(config["hidden_size"])
+    tc = config.get("text_config")
+    if isinstance(tc, dict) and "hidden_size" in tc:
+        return int(tc["hidden_size"])
+    raise ValueError(
+        "Could not read hidden_size from model config (needed to match slab get_scent_dim)."
+    )
+
+
 def _encode_prompt(tokenizer, text):
     messages = [{"role": "user", "content": text}]
     prompt = tokenizer.apply_chat_template(
@@ -114,12 +126,17 @@ def main():
         sys.exit(1)
 
     d = slab_client.get_scent_dim()
-    model, tokenizer = load(MODEL_ID)
-    hidden_size = int(model.model.embed_tokens.weight.shape[-1])
+    model, tokenizer, hf_config = load(MODEL_ID, return_config=True)
+    try:
+        hidden_size = _config_hidden_size(hf_config)
+    except ValueError as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        sys.exit(1)
     if hidden_size != d:
         print(
-            f"[ERROR] Model hidden size {hidden_size} does not match HiveClaw slab "
-            f"configuration {d}. Recompile the C++ extension.",
+            f"[ERROR] Model config hidden_size={hidden_size} does not match "
+            f"HiveClaw slab get_scent_dim()={d}. Use a model with hidden_size {d}, "
+            "or change SCENT_ELEMS in crates/hiveclaw-core/src/math.rs and rebuild.",
             file=sys.stderr,
         )
         sys.exit(1)
