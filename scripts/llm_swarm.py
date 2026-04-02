@@ -101,12 +101,12 @@ class ActiveSteeringWrapper(nn.Module):
         h = out[0] if isinstance(out, tuple) else out
         h_step = h[:, -1:, :]
 
-        scent = self.slab_client.read_scent_for_steering(
+        h_modified = self.slab_client.fused_steer(
             int(self.current_slot),
             h_step,
+            self.alpha,
             depends=h_step,
         )
-        h_modified = h_step + (scent * self.alpha)
         object.__setattr__(self, "last_steered_h", h_modified)
 
         if h.shape[1] > 1:
@@ -179,8 +179,8 @@ def main() -> None:
     )
     args = p.parse_args()
     alpha = float(args.alpha)
-    if not (0.0 <= alpha <= 1.0):
-        print("--alpha must be in [0, 1]", file=sys.stderr)
+    if alpha < 0.0:
+        print("--alpha must be >= 0", file=sys.stderr)
         sys.exit(2)
 
     try:

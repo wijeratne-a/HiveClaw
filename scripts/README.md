@@ -18,7 +18,7 @@ cd ~/dev/HiveClaw
 
 **v3 is removed.** The PyO3 client must handshake with **`cmd=get_surface_v4`**; the daemon replies with **`surface_id`** and **`magic_version`** (`(SLAB_MAGIC << 32) | 4`). Legacy **`get_surface_id`** returns an **`error`** string and must not be used.
 
-**Layout:** each Phase-C slot is **4224 bytes**: 64-byte header (`slot_state` bitfield, Mach `last_claim` ticks, `front_epoch`), **2048×bf16** payload, 64-byte footer (`back_epoch` at byte offset 4160 from slot base, rest reserved). Writers bump **`front_epoch`**, copy the payload, then set **`back_epoch = front_epoch`**. Readers that see **`front_epoch != back_epoch`** must treat the sample as torn (scripts use **`read_scent_if_consistent`** / **`read_scent_for_steering`** and emit one-line JSON telemetry on stderr).
+**Layout:** each Phase-C slot is **4224 bytes**: 64-byte header (`slot_state` bitfield, Mach `last_claim` ticks, `front_epoch`), **2048×bf16** payload, 64-byte footer (`back_epoch` at byte offset 4160 from slot base, rest reserved). Writers bump **`front_epoch`**, copy the payload, then set **`back_epoch = front_epoch`**. Readers that see **`front_epoch != back_epoch`** must treat the sample as torn (Python uses **`read_scent_if_consistent`**; LLM active steering uses **`SlabClient.fused_steer`** on GPU with C++ stderr JSON: **`torn_epoch_skip`** / **`poison_clamp`**, suppressible via **`HIVECLAW_TELEMETRY=0`**). To force the **CPU** fused implementation (Metal off), set **`HIVECLAW_FUSED_GPU=0`**.
 
 **Integration harness (subprocess-safe):** with `pheromoned` loaded and venv active:
 
@@ -49,7 +49,7 @@ make daemon-status
 
 ---
 
-The script runs **Agent A** (prefill → L2-normalized last-token hidden state) writing an **L2-normalized bf16 scent** (length = `get_scent_dim()`, 2048 for the default 1B model) to IOSurface slot 0, then **Agent B** generates with the final layer wrapped to add `alpha * scent` to the last position each step (“active steering”). See `scripts/intelligence_spike.py`.
+The script runs **Agent A** (prefill → L2-normalized last-token hidden state) writing an **L2-normalized bf16 scent** (length = `get_scent_dim()`, 2048 for the default 1B model) to IOSurface slot 0, then **Agent B** generates with the final layer wrapped via **`fused_steer`** (epoch-checked slab read + L2 clamp + blend on GPU). See `scripts/intelligence_spike.py`.
 
 ### 1. Environment reset (Conda off)
 

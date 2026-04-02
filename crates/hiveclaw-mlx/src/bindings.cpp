@@ -175,5 +175,18 @@ NB_MODULE(hiveclaw_mlx_ext, m) {
             nb::arg("agent_id"),
             nb::arg("dep"))
         .def("get_slot_states", [](SlabHandle& self) { return self.get_slot_states(); })
-        .def("release_slot", &SlabHandle::release_slot, nb::arg("slot_index"));
+        .def("release_slot", &SlabHandle::release_slot, nb::arg("slot_index"))
+        .def(
+            "fused_steer",
+            [](SlabHandle& self,
+               uint32_t slot_index,
+               array h_step,
+               float alpha,
+               std::optional<array> dep) {
+                return self.fused_steer(slot_index, std::move(h_step), alpha, std::move(dep));
+            },
+            nb::arg("slot_index"),
+            nb::arg("h_step"),
+            nb::arg("alpha"),
+            nb::arg("dep") = nb::none());
 }

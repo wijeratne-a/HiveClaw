@@ -169,6 +169,41 @@ class SlabClient(_SlabClientBase):
             return mx.zeros_like(h_step)
         return scent
 
+    def fused_steer(
+        self,
+        slot_index: int,
+        h_step: mx.array,
+        alpha: float,
+        *,
+        depends=None,
+    ) -> mx.array:
+        """PR2: epoch check + L2 clamp + h_step + alpha*scent on GPU; C++ stderr JSON on events."""
+        _validate_slot(slot_index)
+        d = self.get_scent_dim()
+        sh = tuple(int(x) for x in h_step.shape)
+        if sh != (1, 1, d):
+            raise ValueError(f"h_step must be [1,1,{d}], got {sh}")
+        orig_dtype = h_step.dtype
+        if orig_dtype == mx.bfloat16:
+            h_work = h_step
+        elif orig_dtype in (mx.float16, mx.float32):
+            # mlx_lm Llama hidden states are often float16; C++ primitive is bf16-only.
+            h_work = h_step.astype(mx.bfloat16)
+        else:
+            raise ValueError(
+                f"h_step dtype must be bfloat16, float16, or float32, got {h_step.dtype}"
+            )
+        h_c = mx.contiguous(h_work)
+        if depends is None:
+            out = self._slab_handle.fused_steer(int(slot_index), h_c, float(alpha))
+        else:
+            out = self._slab_handle.fused_steer(
+                int(slot_index), h_c, float(alpha), depends
+            )
+        if orig_dtype != mx.bfloat16:
+            out = out.astype(orig_dtype)
+        return out
+
     def write_scent(
         self, slot_index: int, scent: mx.array, *, depends=None
     ) -> mx.array:

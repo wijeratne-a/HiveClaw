@@ -54,6 +54,12 @@ class SlabHandle {
     /// CPU best-effort snapshot: [{claimed, owner_id}, ...] for all 32 slots.
     std::vector<std::pair<bool, uint32_t>> get_slot_states() const;
 
+    /// PR2: fused epoch check + L2 clamp on alpha*scent + h_step blend (GPU/CPU).
+    mlx::core::array fused_steer(uint32_t slot_index,
+                                 mlx::core::array h_step,
+                                 float alpha,
+                                 std::optional<mlx::core::array> dep);
+
     MTL::Buffer* raw_buffer() const { return slab_buf_; }
 
    private:
@@ -125,4 +131,44 @@ class ReadSlab : public mlx::core::Primitive {
     MTL::Buffer* slab_buf_;
     size_t byte_offset_;
     mlx::core::Shape shape_;
+};
+
+// PR2: single-kernel fused read + torn-epoch + poison clamp + steering (bf16 h_step).
+class FusedSteerScent : public mlx::core::Primitive {
+   public:
+    FusedSteerScent(MTL::Buffer* slab,
+                    uint32_t slot_index,
+                    float alpha,
+                    mlx::core::Stream s);
+    ~FusedSteerScent();
+
+    FusedSteerScent(const FusedSteerScent&) = delete;
+    FusedSteerScent& operator=(const FusedSteerScent&) = delete;
+
+    void eval_cpu(const std::vector<mlx::core::array>& inputs,
+                  std::vector<mlx::core::array>& outputs) override;
+    void eval_gpu(const std::vector<mlx::core::array>& inputs,
+                  std::vector<mlx::core::array>& outputs) override;
+    std::vector<mlx::core::array> jvp(
+        const std::vector<mlx::core::array>& primals,
+        const std::vector<mlx::core::array>& tangents,
+        const std::vector<int>& argnums) override;
+    std::vector<mlx::core::array> vjp(
+        const std::vector<mlx::core::array>& primals,
+        const std::vector<mlx::core::array>& cotangents,
+        const std::vector<int>& argnums,
+        const std::vector<mlx::core::array>& outputs) override;
+    std::pair<std::vector<mlx::core::array>, std::vector<int>> vmap(
+        const std::vector<mlx::core::array>& inputs,
+        const std::vector<int>& axes) override;
+    std::vector<mlx::core::Shape> output_shapes(
+        const std::vector<mlx::core::array>& inputs) override;
+    const char* name() const override { return "FusedSteerScent"; }
+
+   private:
+    MTL::Buffer* slab_buf_;
+    uint32_t slot_index_;
+    float alpha_;
+    /// 1-byte shared; kernel writes 0/1/2; completion handler emits stderr JSON.
+    MTL::Buffer* status_buf_{nullptr};
 };

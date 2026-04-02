@@ -51,8 +51,7 @@ class CaptureWrapper(nn.Module):
 class ActiveSteeringWrapper(nn.Module):
     """
     Wraps the final transformer layer.
-    On every forward call: runs the real layer, reads the VRAM scent,
-    adds alpha * scent to the last token's hidden state, returns modified output.
+    On every forward: runs the layer, then `fused_steer` (GPU epoch check + L2 clamp + blend).
     """
 
     def __init__(self, layer, slab_client, scent_dim: int, alpha=0.1):
@@ -73,17 +72,12 @@ class ActiveSteeringWrapper(nn.Module):
     def __call__(self, *args, **kwargs):
         out = self.layer(*args, **kwargs)
         h = out[0] if isinstance(out, tuple) else out
-        d = self.scent_dim
 
         h_step = h[:, -1:, :]  # (batch, 1, D) — only steer last position
 
-        scent = self.slab_client.read_scent_for_steering(
-            SLOT_INDEX,
-            h_step,
-            depends=h_step,
+        h_modified = self.slab_client.fused_steer(
+            SLOT_INDEX, h_step, self.alpha, depends=h_step
         )
-
-        h_modified = h_step + (scent * self.alpha)
 
         if h.shape[1] > 1:
             h_final = mx.concatenate([h[:, :-1, :], h_modified], axis=1)
