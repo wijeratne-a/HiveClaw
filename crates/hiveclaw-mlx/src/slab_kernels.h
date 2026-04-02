@@ -39,7 +39,7 @@ class ClaimSlabTask : public mlx::core::UnaryPrimitive {
     uint32_t agent_id_;
 };
 
-/// v4: memsets full slot stride, sets INHIBITED + watchdog bit 0 (no zeta clock).
+/// v5: memsets full slot stride for the target slot and marks it INHIBITED (overseer / fault path).
 class InhibitSlab : public mlx::core::Primitive {
    public:
     InhibitSlab(MTL::Buffer* slab,

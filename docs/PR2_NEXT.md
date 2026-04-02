@@ -1,11 +1,9 @@
-# PR2: zero-copy fused steering (implemented)
+# PR2 / Phase 4 v5 (Slab + SAE steering)
 
-- `FusedSteerScent` CustomOp in `crates/hiveclaw-mlx/src/slab_primitives.cpp`: epoch check + L2 ceiling (2.0) on `||alpha * scent||` + `h_step` blend; embedded MSL `fused_steer_bf16` runs on **Metal** by default.
-- **GPU path (restored):** `eval_gpu` dispatches **one threadgroup of 256 threads** (`dispatch_threadgroups((1,1,1), (256,1,1))`) to match the kernel’s `thread_index_in_threadgroup` + `tid * 8` coverage over 2048 dims. The auxiliary **status** buffer is kept alive across async completion via an extra `retain()` before `addCompletedHandler` and matching `release()` in the handler (fixes prior `kIOGPUCommandBufferCallbackErrorInvalidResource` from destructor vs in-flight command buffers).
-- **Rollback:** set **`HIVECLAW_FUSED_GPU=0`** to force the CPU implementation (same numerics/telemetry, no fused Metal kernel).
-- **Telemetry:** after the GPU kernel finishes, the completion handler reads shared `status` and emits stderr JSON for **`torn_epoch_skip`** (status `1`) and **`poison_clamp`** (status `2`); status `0` is silent. **`HIVECLAW_TELEMETRY=0`** suppresses stderr (handler still runs for buffer lifetime).
-- Python: `SlabClient.fused_steer` (casts **float16/float32** `h_step` to bf16 for the C++ op, then casts back); `intelligence_spike.py` / `llm_swarm.py` use fused path (no `read_scent_for_steering` on the hot path). Rebuild with **`make python`** after changing the MLX extension.
+- **`FusedSteerScent` removed.** Steering is **Python-side MLX**: `read_slot_v5` → decode with tied SAE weights → L2 poison clamp → add to `h_step`. `intelligence_spike.py` / `llm_swarm.py` load `models/hiveclaw_sae_v1.safetensors`.
+- **`ReadSlab` v5:** 512-byte payload, shape **`[1,1,256]`** bf16, **torn epoch → zeros**; GPU path uses embedded MSL **`read_slab_v5`** (32×8 threads) + **1-byte status** buffer; completion handler may emit **`torn_epoch_skip`** JSON to stderr when **`HIVECLAW_TELEMETRY != "0"`**.
+- **`WriteSlab` v5 (stamped slots):** strict **`[1,1,256]`** bf16, bumps **`front_epoch`**, memcpy 512 B, sets **`back_epoch`** at slot **+576**.
+- **Layout:** global header **4096** B; **4096** slots × **640** B stride; magic/version at bytes **0–11** (`0x48434C5700000005`, version **5**). XPC cmd **`get_surface_v5`** only; other commands → **`INVALID_COMMAND_OR_UNSUPPORTED_VERSION`**.
+- **Training pipeline:** `scripts/harvester.py` → `models/latent_traces_*.npz` → `scripts/train_sae.py` → `models/hiveclaw_sae_v1.safetensors` (ignored by git). Verify with `scripts/test_sae_tied_weights.py`.
 
-**Phase 4 / SAE:** runtime `D` from tensor shape (not fixed 2048) remains future work.
-
-See internal roadmap for ordering vs Mach dead-name eviction.
+See `scripts/README.md` for rebuild / daemon / integration gates.

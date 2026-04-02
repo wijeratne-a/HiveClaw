@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Subprocess integration checks for HiveClaw v4 (macOS + pheromoned required).
+Subprocess integration checks for HiveClaw v5 (macOS + pheromoned required).
 
-Exit 0: SlabClient XPC v4 handshake + optional short swarm stress.
+Exit 0: SlabClient XPC v5 handshake, global header, read_slot_v5 shape.
 Review stderr for JSON telemetry (torn_epoch_skip, etc.) manually for PR merges.
 
 Usage:
@@ -10,7 +10,8 @@ Usage:
   # pheromoned must be running: make daemon-load
   python scripts/integration_test.py
   python scripts/integration_test.py --quick   # XPC + import only
-  python scripts/integration_test.py --stress  # + swarm_spike + SIGKILL child
+  python scripts/integration_test.py --stress  # + claim/release loop + swarm_spike child
+  python scripts/integration_test.py --stress --stress-max-slots 4096  # full slab gauntlet
 """
 
 from __future__ import annotations
@@ -23,18 +24,43 @@ import sys
 import time
 from pathlib import Path
 
+EXPECT_MAGIC = 0x48434C5700000005
+
+
+def _stress_claim_release(n_slots: int) -> None:
+    import mlx.core as mx
+
+    import hiveclaw_python as h
+
+    c = h.SlabClient()
+    for i in range(n_slots):
+        cand = mx.array([i], dtype=mx.int32)
+        r = c.claim_task(cand)
+        mx.eval(r)
+        got = int(mx.array(r).item())
+        assert got == i, (got, i)
+        c.release_task(i)
+    print(f"[integration_test] stress ok: {n_slots} claim/release cycles", flush=True)
+
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="HiveClaw v4 integration harness")
+    p = argparse.ArgumentParser(description="HiveClaw v5 integration harness")
     p.add_argument(
         "--quick",
         action="store_true",
-        help="Only verify SlabClient / get_surface_v4 (no subprocess agents)",
+        help="Only verify SlabClient / get_surface_v5 (no subprocess agents)",
     )
     p.add_argument(
         "--stress",
         action="store_true",
-        help="Run swarm_spike child and SIGKILL it (requires daemon + MLX)",
+        help="Run claim/release stress + swarm_spike child SIGKILL",
+    )
+    p.add_argument(
+        "--stress-max-slots",
+        type=int,
+        default=256,
+        metavar="N",
+        help="Sequential slots for --stress (default 256; use 4096 for full slab)",
     )
     args = p.parse_args()
 
@@ -47,7 +73,12 @@ def main() -> int:
             py,
             "-c",
             "import hiveclaw_python as h; c=h.SlabClient(); "
-            "assert c.get_scent_dim()>0; print('ok', c.get_scent_dim())",
+            f"assert c.get_latent_dim()==256; "
+            f"assert c.read_u64_at(0)=={EXPECT_MAGIC}; "
+            "assert c.read_u32_at(8)==5; "
+            "import mlx.core as mx; z=c.read_slot_v5(0); "
+            "assert list(z.shape)==[1,1,256]; "
+            "print('ok', c.get_latent_dim())",
         ],
         cwd=repo,
         capture_output=True,
@@ -68,6 +99,16 @@ def main() -> int:
         return 0
 
     if args.stress:
+        n = int(args.stress_max_slots)
+        if n < 1 or n > 4096:
+            print("--stress-max-slots must be in [1, 4096]", file=sys.stderr)
+            return 2
+        try:
+            _stress_claim_release(n)
+        except Exception as e:
+            print(f"stress failed: {e}", file=sys.stderr)
+            return 1
+
         sp = subprocess.Popen(
             [py, str(repo / "scripts" / "swarm_spike.py")],
             cwd=repo,
@@ -86,4 +127,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Support `python -c` only for stress body — normal entry is main().
     raise SystemExit(main())

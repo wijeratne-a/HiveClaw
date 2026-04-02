@@ -21,7 +21,7 @@ FATAL_LINE = (
     "See scripts/README.md."
 )
 
-_N_SLOTS = 32
+_N_SLOTS = 4096
 _K = 5
 
 
@@ -51,14 +51,13 @@ def main() -> None:
         print(FATAL_LINE, file=sys.stderr)
         sys.exit(1)
 
-    d = client.get_scent_dim()
+    d = client.get_latent_dim()
     history: list[collections.deque[np.ndarray]] = [
         collections.deque(maxlen=_K) for _ in range(_N_SLOTS)
     ]
-    like_proto = mx.zeros([d], dtype=mx.bfloat16)
 
     print(
-        f"[overseer] pid={os.getpid()} scent_dim={d} tick_ms={tick_ms} "
+        f"[overseer] pid={os.getpid()} latent_dim={d} tick_ms={tick_ms} "
         f"var_threshold={var_threshold}",
         flush=True,
     )
@@ -72,14 +71,10 @@ def main() -> None:
                     history[slot_idx].clear()
                     continue
 
-                scent_bf16 = client.read_scent_if_consistent(
-                    slot_idx, [d], like=like_proto, context="overseer"
-                )
-                if scent_bf16 is None:
-                    continue
+                scent_bf16 = client.read_slot_v5(slot_idx)
                 scent_f32 = scent_bf16.astype(mx.float32)
                 mx.eval(scent_f32)
-                sample = np.array(scent_f32, dtype=np.float32)
+                sample = np.array(scent_f32, dtype=np.float32).reshape(-1)
                 history[slot_idx].append(sample)
 
                 if len(history[slot_idx]) < _K:

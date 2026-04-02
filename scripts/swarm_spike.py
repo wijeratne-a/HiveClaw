@@ -22,7 +22,7 @@ FATAL_LINE = (
     "See scripts/README.md."
 )
 
-_N_SLOTS = 32
+_N_SLOTS = 4096
 
 
 def _chaos_seed() -> int:
@@ -30,8 +30,8 @@ def _chaos_seed() -> int:
 
 
 def _cosine_read_np(vec_bf16_1d: mx.array, goal_f32_1d: np.ndarray) -> float:
-    """vec_bf16_1d flat [D] bf16; goal_f32_1d flat [D] float32."""
-    v = np.array(vec_bf16_1d.astype(mx.float32), dtype=np.float64)
+    """Cosine similarity; flattens any leading dims (e.g. [1,1,D])."""
+    v = np.array(vec_bf16_1d.astype(mx.float32), dtype=np.float64).reshape(-1)
     g = goal_f32_1d.astype(np.float64)
     nv = np.linalg.norm(v)
     ng = np.linalg.norm(g)
@@ -91,9 +91,8 @@ def main() -> None:
         print(FATAL_LINE, file=sys.stderr)
         sys.exit(1)
 
-    d = client.get_scent_dim()
+    d = client.get_latent_dim()
     inner = max(1, d // 4)
-    like_bf16 = mx.zeros([d], dtype=mx.bfloat16)
 
     # Random normalized goal bf16 [1, 1, D]
     g = rng.standard_normal(d, dtype=np.float32)
@@ -113,7 +112,7 @@ def main() -> None:
     mx.eval(goal, W, V)
 
     print(
-        f"[swarm_spike] pid={os.getpid()} scent_dim={d} alpha={alpha} "
+        f"[swarm_spike] pid={os.getpid()} latent_dim={d} alpha={alpha} "
         f"hold_steps={hold_steps} seed={seed & 0xFFFFFFFFFFFFFFFF:x}",
         flush=True,
     )
@@ -129,11 +128,7 @@ def main() -> None:
 
             scored: list[tuple[float, int]] = []
             for slot in unclaimed:
-                read_n = client.read_scent_if_consistent(
-                    slot, [d], like=like_bf16, context="swarm_spike_sense"
-                )
-                if read_n is None:
-                    continue
+                read_n = client.read_slot_v5(slot)
                 mx.eval(read_n)
                 cos = _cosine_read_np(read_n, goal_f32_1d)
                 scored.append((cos, slot))
@@ -152,12 +147,7 @@ def main() -> None:
                 time.sleep(random.uniform(0.001, 0.010))
                 continue
 
-            slot_scent = client.read_scent_if_consistent(
-                slot, [d], like=like_bf16, context="swarm_spike_hold"
-            )
-            if slot_scent is None:
-                client.release_task(slot)
-                continue
+            slot_scent = client.read_slot_v5(slot)
             mx.eval(slot_scent)
             slot_bf16_3d = slot_scent.reshape(1, 1, d)
             h = slot_bf16_3d.astype(mx.float32)

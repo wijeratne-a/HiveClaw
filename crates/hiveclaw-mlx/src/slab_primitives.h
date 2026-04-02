@@ -27,7 +27,7 @@ class SlabHandle {
                            mlx::core::array scent_c,
                            std::optional<mlx::core::array> dep);
 
-    /// Phase C: write scent at `slot_payload(slot_index)` and stamp `last_write_clock`.
+    /// Phase C v5: write 512-byte latent at `slot_payload(slot_index)`; stamps front/back epoch.
     mlx::core::array write_slot(uint32_t slot_index,
                                 mlx::core::array scent_c,
                                 std::optional<mlx::core::array> dep);
@@ -40,6 +40,15 @@ class SlabHandle {
                                mlx::core::Shape shape,
                                std::optional<mlx::core::array> dep);
 
+    /// v5: read [1,1,256] bf16 with torn-epoch detection (zeros on torn).
+    mlx::core::array read_slot_v5(uint32_t slot_index,
+                                  std::optional<mlx::core::array> dep);
+
+    /// v5: write [1,1,256] bf16 strictly; 512 bytes + epoch stamp.
+    mlx::core::array write_slot_v5(uint32_t slot_index,
+                                   mlx::core::array latent,
+                                   std::optional<mlx::core::array> dep);
+
     mlx::core::array claim(mlx::core::array candidate_indices,
                            uint32_t agent_id,
                            std::optional<mlx::core::array> dep);
@@ -51,14 +60,8 @@ class SlabHandle {
     /// CPU: clear claim_flag (call when done with a held slot).
     void release_slot(uint32_t slot_index);
 
-    /// CPU best-effort snapshot: [{claimed, owner_id}, ...] for all 32 slots.
+    /// CPU snapshot: [{claimed, owner_id}, ...] for all slots.
     std::vector<std::pair<bool, uint32_t>> get_slot_states() const;
-
-    /// PR2: fused epoch check + L2 clamp on alpha*scent + h_step blend (GPU/CPU).
-    mlx::core::array fused_steer(uint32_t slot_index,
-                                 mlx::core::array h_step,
-                                 float alpha,
-                                 std::optional<mlx::core::array> dep);
 
     MTL::Buffer* raw_buffer() const { return slab_buf_; }
 
@@ -100,13 +103,15 @@ class WriteSlab : public mlx::core::UnaryPrimitive {
     uint32_t stamp_slot_index_;
 };
 
-// MLX Primitive: copies slab[byte_offset] → fresh bf16 array.
+// MLX Primitive: copies slab[byte_offset] → fresh bf16 array; optional v5 epoch torn check.
 class ReadSlab : public mlx::core::Primitive {
    public:
     ReadSlab(MTL::Buffer* slab,
              size_t byte_offset,
              mlx::core::Shape shape,
-             mlx::core::Stream s);
+             mlx::core::Stream s,
+             std::optional<uint32_t> v5_slot_for_epoch = std::nullopt);
+    ~ReadSlab() override;
     void eval_cpu(const std::vector<mlx::core::array>& inputs,
                   std::vector<mlx::core::array>& outputs) override;
     void eval_gpu(const std::vector<mlx::core::array>& inputs,
@@ -131,44 +136,7 @@ class ReadSlab : public mlx::core::Primitive {
     MTL::Buffer* slab_buf_;
     size_t byte_offset_;
     mlx::core::Shape shape_;
-};
-
-// PR2: single-kernel fused read + torn-epoch + poison clamp + steering (bf16 h_step).
-class FusedSteerScent : public mlx::core::Primitive {
-   public:
-    FusedSteerScent(MTL::Buffer* slab,
-                    uint32_t slot_index,
-                    float alpha,
-                    mlx::core::Stream s);
-    ~FusedSteerScent();
-
-    FusedSteerScent(const FusedSteerScent&) = delete;
-    FusedSteerScent& operator=(const FusedSteerScent&) = delete;
-
-    void eval_cpu(const std::vector<mlx::core::array>& inputs,
-                  std::vector<mlx::core::array>& outputs) override;
-    void eval_gpu(const std::vector<mlx::core::array>& inputs,
-                  std::vector<mlx::core::array>& outputs) override;
-    std::vector<mlx::core::array> jvp(
-        const std::vector<mlx::core::array>& primals,
-        const std::vector<mlx::core::array>& tangents,
-        const std::vector<int>& argnums) override;
-    std::vector<mlx::core::array> vjp(
-        const std::vector<mlx::core::array>& primals,
-        const std::vector<mlx::core::array>& cotangents,
-        const std::vector<int>& argnums,
-        const std::vector<mlx::core::array>& outputs) override;
-    std::pair<std::vector<mlx::core::array>, std::vector<int>> vmap(
-        const std::vector<mlx::core::array>& inputs,
-        const std::vector<int>& axes) override;
-    std::vector<mlx::core::Shape> output_shapes(
-        const std::vector<mlx::core::array>& inputs) override;
-    const char* name() const override { return "FusedSteerScent"; }
-
-   private:
-    MTL::Buffer* slab_buf_;
-    uint32_t slot_index_;
-    float alpha_;
-    /// 1-byte shared; kernel writes 0/1/2; completion handler emits stderr JSON.
+    std::optional<uint32_t> v5_slot_for_epoch_;
+    /// 1-byte shared; v5 GPU path only; completion handler may emit telemetry.
     MTL::Buffer* status_buf_{nullptr};
 };

@@ -1,8 +1,5 @@
-import json
 import math
 import os
-import sys
-import time
 
 import mlx.core as mx
 
@@ -17,25 +14,7 @@ except ImportError as e:  # pragma: no cover
     ) from e
 
 _SLAB_SIZE = 4_718_720
-_N_SLOTS = 32
-# Slab v4 Phase-C (must match hiveclaw-core math.rs)
-_PHASE_C_GLOBAL_HDR = 128
-_SLOT_STRIDE_V4 = 4224
-_OFF_S_FRONT_EPOCH = 12
-_OFF_SLOT_BACK_EPOCH = 4160
-
-
-def _telemetry_log(obj: dict) -> None:
-    o = dict(obj)
-    o.setdefault("ts_ns", time.time_ns())
-    sys.stderr.write(json.dumps(o, separators=(",", ":")) + "\n")
-    sys.stderr.flush()
-
-
-def _slot_byte_base(slot_index: int) -> int:
-    return _PHASE_C_GLOBAL_HDR + int(slot_index) * _SLOT_STRIDE_V4
-
-
+_N_SLOTS = 4096
 def _validate_write(byte_offset: int, scent: mx.array) -> None:
     if scent.dtype != mx.bfloat16:
         raise ValueError(f"scent must be bfloat16, got {scent.dtype}")
@@ -64,12 +43,12 @@ def _validate_slot(slot_index: int) -> None:
         raise ValueError(f"slot_index must be in [0, {_N_SLOTS}), got {slot_index}")
 
 
-def _validate_slot_scent(scent: mx.array, expected: int) -> None:
-    if scent.dtype != mx.bfloat16:
-        raise ValueError(f"scent must be bfloat16, got {scent.dtype}")
-    if scent.size != expected:
+def _validate_slot_latent(latent: mx.array, expected: int) -> None:
+    if latent.dtype != mx.bfloat16:
+        raise ValueError(f"latent must be bfloat16, got {latent.dtype}")
+    if latent.size != expected:
         raise ValueError(
-            f"Phase C scent must have {expected} bf16 elements, got {scent.size}"
+            f"Phase C latent must have {expected} bf16 elements, got {latent.size}"
         )
 
 
@@ -83,133 +62,45 @@ class SlabClient(_SlabClientBase):
         super().__init__()
         self._slab_handle = _mlx.SlabHandle(self.surface_id())
 
-    def get_scent_dim(self) -> int:
-        """Number of bf16 elements per Phase C scent slot (compiled `SCENT_ELEMS` in math.rs)."""
-        return int(super().get_scent_dim())
+    def get_latent_dim(self) -> int:
+        """SAE latent width (256); matches `SCENT_ELEMS` / `get_latent_dim()` in MLX ext."""
+        return int(_mlx.get_latent_dim())
 
-    def read_scent_if_consistent(
-        self,
-        slot_index: int,
-        shape: list,
-        *,
-        like=None,
-        depends=None,
-        context: str = "read",
-    ):
-        """Read scent only if front_epoch == back_epoch before and after the read; else None."""
-        _validate_slot(slot_index)
-        st = _shape_list(shape)
-        sb = _slot_byte_base(slot_index)
-        fe = self.read_u32_at(sb + _OFF_S_FRONT_EPOCH)
-        be = self.read_u32_at(sb + _OFF_SLOT_BACK_EPOCH)
-        if fe != be:
-            _telemetry_log(
-                {
-                    "event": "torn_epoch_skip",
-                    "context": context,
-                    "slot_id": int(slot_index),
-                    "front_epoch": fe,
-                    "back_epoch": be,
-                    "stage": "pre",
-                }
-            )
-            return None
-        arr = self.read_scent(slot_index, st, like=like, depends=depends)
-        fe2 = self.read_u32_at(sb + _OFF_S_FRONT_EPOCH)
-        be2 = self.read_u32_at(sb + _OFF_SLOT_BACK_EPOCH)
-        if fe2 != fe or be2 != be or fe2 != be2:
-            _telemetry_log(
-                {
-                    "event": "torn_epoch_skip",
-                    "context": context,
-                    "slot_id": int(slot_index),
-                    "front_epoch": fe2,
-                    "back_epoch": be2,
-                    "stage": "post",
-                }
-            )
-            return None
-        return arr
-
-    def read_scent_for_steering(self, slot_index: int, h_step: mx.array, *, depends=None):
-        """Epoch-checked slab read for active steering; torn read => zero tensor (silent swarm)."""
-        _validate_slot(slot_index)
-        sb = _slot_byte_base(slot_index)
-        fe = self.read_u32_at(sb + _OFF_S_FRONT_EPOCH)
-        be = self.read_u32_at(sb + _OFF_SLOT_BACK_EPOCH)
-        if fe != be:
-            _telemetry_log(
-                {
-                    "event": "torn_read_steering_zero",
-                    "slot_id": int(slot_index),
-                    "front_epoch": fe,
-                    "back_epoch": be,
-                    "stage": "pre",
-                }
-            )
-            return mx.zeros_like(h_step)
-        dep = depends if depends is not None else h_step
-        scent = self.read_scent(
-            slot_index,
-            [1, 1, int(h_step.shape[-1])],
-            depends=dep,
-        )
-        fe2 = self.read_u32_at(sb + _OFF_S_FRONT_EPOCH)
-        be2 = self.read_u32_at(sb + _OFF_SLOT_BACK_EPOCH)
-        if fe2 != fe or be2 != be or fe2 != be2:
-            _telemetry_log(
-                {
-                    "event": "torn_read_steering_zero",
-                    "slot_id": int(slot_index),
-                    "front_epoch": fe2,
-                    "back_epoch": be2,
-                    "stage": "post",
-                }
-            )
-            return mx.zeros_like(h_step)
-        return scent
-
-    def fused_steer(
-        self,
-        slot_index: int,
-        h_step: mx.array,
-        alpha: float,
-        *,
-        depends=None,
+    def read_slot_v5(
+        self, slot_index: int, *, depends=None
     ) -> mx.array:
-        """PR2: epoch check + L2 clamp + h_step + alpha*scent on GPU; C++ stderr JSON on events."""
+        """Read [1,1,256] bf16; torn epoch → zeros (handled in C++)."""
         _validate_slot(slot_index)
-        d = self.get_scent_dim()
-        sh = tuple(int(x) for x in h_step.shape)
-        if sh != (1, 1, d):
-            raise ValueError(f"h_step must be [1,1,{d}], got {sh}")
-        orig_dtype = h_step.dtype
-        if orig_dtype == mx.bfloat16:
-            h_work = h_step
-        elif orig_dtype in (mx.float16, mx.float32):
-            # mlx_lm Llama hidden states are often float16; C++ primitive is bf16-only.
-            h_work = h_step.astype(mx.bfloat16)
-        else:
+        latent_c = (
+            self._slab_handle.read_slot_v5(int(slot_index))
+            if depends is None
+            else self._slab_handle.read_slot_v5(int(slot_index), depends)
+        )
+        return latent_c
+
+    def write_slot_v5(
+        self, slot_index: int, latent: mx.array, *, depends=None
+    ) -> mx.array:
+        """Write strict [1,1,256] bfloat16; stamps epochs in C++."""
+        _validate_slot(slot_index)
+        sh = tuple(int(x) for x in latent.shape)
+        if sh != (1, 1, self.get_latent_dim()):
             raise ValueError(
-                f"h_step dtype must be bfloat16, float16, or float32, got {h_step.dtype}"
+                f"latent must be [1,1,{self.get_latent_dim()}] bfloat16, got {sh} {latent.dtype}"
             )
-        h_c = mx.contiguous(h_work)
+        if latent.dtype != mx.bfloat16:
+            raise ValueError(f"latent must be bfloat16, got {latent.dtype}")
+        latent_c = mx.contiguous(latent)
         if depends is None:
-            out = self._slab_handle.fused_steer(int(slot_index), h_c, float(alpha))
-        else:
-            out = self._slab_handle.fused_steer(
-                int(slot_index), h_c, float(alpha), depends
-            )
-        if orig_dtype != mx.bfloat16:
-            out = out.astype(orig_dtype)
-        return out
+            return self._slab_handle.write_slot_v5(int(slot_index), latent_c)
+        return self._slab_handle.write_slot_v5(int(slot_index), latent_c, depends)
 
     def write_scent(
         self, slot_index: int, scent: mx.array, *, depends=None
     ) -> mx.array:
-        """Write bf16 scent vector to Phase C slot `slot_index` (stamps last_write_clock)."""
+        """Write bf16 latent vector to Phase C slot `slot_index` (stamps epochs)."""
         _validate_slot(slot_index)
-        _validate_slot_scent(scent, self.get_scent_dim())
+        _validate_slot_latent(scent, self.get_latent_dim())
         scent_c = mx.contiguous(scent)
         if depends is None:
             return self._slab_handle.write_slot(int(slot_index), scent_c)
@@ -220,8 +111,6 @@ class SlabClient(_SlabClientBase):
     ) -> mx.array:
         _validate_slot(slot_index)
         st = _shape_list(shape)
-        # `like` is kept for call-site compatibility; slab reads use the default GPU
-        # stream unless `depends` is set (stream is taken from `depends`).
         _ = like
         if depends is None:
             return self._slab_handle.read_slot(int(slot_index), st)
@@ -249,7 +138,7 @@ class SlabClient(_SlabClientBase):
         return self._slab_handle.read(byte_offset, st, depends)
 
     def get_slot_states(self) -> list:
-        """Best-effort snapshot: [{'claimed': bool, 'owner_id': int}, ...] for 32 slots."""
+        """Best-effort snapshot for all slots (4096 for v5)."""
         raw = self._slab_handle.get_slot_states()
         return [{"claimed": bool(c), "owner_id": int(oid)} for c, oid in raw]
 
@@ -265,7 +154,7 @@ class SlabClient(_SlabClientBase):
     def release_task(self, slot_index: int, *, depends=None) -> None:
         """Clear claim_flag on the CPU (call when finished with a held slot)."""
         _validate_slot(slot_index)
-        _ = depends  # ordering: release is synchronous CPU; MLX graph deps not applied here
+        _ = depends
         self._slab_handle.release_slot(int(slot_index))
 
     def inhibit(self, slot_index: int, owner_id: int | None = None, *, depends=None) -> mx.array:

@@ -125,8 +125,6 @@ void InhibitSlab::eval_cpu(const std::vector<array>& inputs,
     std::memset(base + sb, 0, HCLW_SLOT_STRIDE);
     reinterpret_cast<std::atomic<uint32_t>*>(base + sb + OFF_S_CLAIM_FLAG)
         ->store(HCLW_SLOT_STATUS_INHIBITED, std::memory_order_release);
-    uint32_t* watchdog = reinterpret_cast<uint32_t*>(base + sb + OFF_S_WATCHDOG_FLAGS);
-    *watchdog |= 0x1u;
 
     auto& out = outputs[0];
     out.set_data(mlx::core::allocator::malloc(sizeof(int32_t)));

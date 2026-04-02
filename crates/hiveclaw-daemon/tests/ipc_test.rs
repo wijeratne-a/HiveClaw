@@ -1,4 +1,4 @@
-//! XPC + IOSurface integration tests (Phase 4 + Phase C).
+//! XPC + IOSurface integration tests (Phase 4 + Phase C v5).
 //!
 //! All tests share one `launchd` Mach registration (`com.hiveclaw.pheromoned`) and must not run in
 //! parallel with each other (or with other test binaries that bootstrap the same label).
@@ -12,12 +12,11 @@ mod ipc_macos {
     use half::bf16;
     use hiveclaw_backend_metal::MetalPheromoneBuffer;
     use hiveclaw_core::math::{
-        N_SLOTS, OFF_G_ZETA_T, OFF_S_CLAIM_FLAG, OFF_S_LAST_CLAIM_MACH, OFF_S_SLOT_STATE,
-        OFF_S_WATCHDOG_FLAGS, SCENT_ELEMS, SLOT0_SCALAR_BYTE_OFFSET, SLOT_STATUS_CLAIMED,
-        SLOT_STATUS_INHIBITED, SLOT_STRIDE, pack_slot_claimed, slot_base, slot_payload,
-        slot_status,
+        layout_magic_version_u64, N_SLOTS, OFF_G_VERSION_V5, OFF_S_CLAIM_FLAG, OFF_S_LAST_CLAIM_MACH,
+        OFF_S_SLOT_STATE, SCENT_ELEMS, SLOT_STATUS_CLAIMED, SLOT_STATUS_INHIBITED, SLOT_STRIDE,
+        pack_slot_claimed, slot_base, slot_payload, slot_status,
     };
-    use hiveclaw_daemon::xpc::fetch_surface_id;
+    use hiveclaw_daemon::xpc::fetch_surface_v5;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -82,7 +81,6 @@ mod ipc_macos {
             fs::write(&plist_path, plist_body.as_bytes()).expect("write plist");
 
             let plist_s = plist_path.to_str().expect("plist path utf-8");
-            // Prefer bootout by plist path (matches `bootstrap` target on recent macOS).
             let _ = Command::new("launchctl")
                 .args(["bootout", &domain, plist_s])
                 .status();
@@ -120,7 +118,7 @@ mod ipc_macos {
     fn wait_for_xpc() -> u32 {
         let start = Instant::now();
         for _ in 0..POLL_MAX {
-            if let Ok(id) = fetch_surface_id() {
+            if let Ok((id, _)) = fetch_surface_v5() {
                 return id;
             }
             thread::sleep(Duration::from_millis(POLL_MS));
@@ -129,6 +127,29 @@ mod ipc_macos {
             "timed out after {:?} waiting for XPC ({POLL_MAX}×{POLL_MS}ms)",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn global_header_v5_validation() {
+        let _serial = launchd_serial_lock();
+        if std::env::var("HIVECLAW_SKIP_LAUNCHD_TEST").as_deref() == Ok("1") {
+            eprintln!("SKIP ipc: HIVECLAW_SKIP_LAUNCHD_TEST=1");
+            return;
+        }
+
+        let exe = PathBuf::from(env!("CARGO_BIN_EXE_pheromoned"));
+        let _guard = LaunchdGuard::bootstrap(&exe);
+        let id = wait_for_xpc();
+
+        let slab = MetalPheromoneBuffer::from_surface_id(id);
+        let base = slab.base_ptr();
+
+        fence(Ordering::SeqCst);
+
+        let magic = unsafe { ptr::read_unaligned(base as *const u64) };
+        let ver = unsafe { ptr::read_unaligned(base.add(OFF_G_VERSION_V5) as *const u32) };
+        assert_eq!(magic, layout_magic_version_u64());
+        assert_eq!(ver, 5);
     }
 
     #[test]
@@ -148,33 +169,10 @@ mod ipc_macos {
 
         fence(Ordering::SeqCst);
 
-        let zeros: [f32; 4] = unsafe {
-            let p = base.add(SLOT0_SCALAR_BYTE_OFFSET) as *const f32;
-            [p.read(), p.add(1).read(), p.add(2).read(), p.add(3).read()]
-        };
-        assert_eq!(zeros.map(f32::to_bits), [0f32; 4].map(f32::to_bits));
-
-        let scalars = [1.0f32, 2.0, 3.0, 4.0];
-        unsafe {
-            ptr::copy_nonoverlapping(
-                scalars.as_ptr(),
-                base.add(SLOT0_SCALAR_BYTE_OFFSET) as *mut f32,
-                4,
-            );
-        }
-        fence(Ordering::SeqCst);
-        let read_back: [f32; 4] = unsafe {
-            let p = base.add(SLOT0_SCALAR_BYTE_OFFSET) as *const f32;
-            [p.read(), p.add(1).read(), p.add(2).read(), p.add(3).read()]
-        };
-        assert_eq!(read_back[0].to_bits(), scalars[0].to_bits());
-        assert_eq!(read_back[1].to_bits(), scalars[1].to_bits());
-        assert_eq!(read_back[2].to_bits(), scalars[2].to_bits());
-        assert_eq!(read_back[3].to_bits(), scalars[3].to_bits());
-
+        assert_eq!(SCENT_ELEMS, 256);
+        let scent0 = slot_payload(0);
         let a = bf16::from_f32(0.5);
         let b = bf16::from_f32(-0.5);
-        let scent0 = slot_payload(0);
         unsafe {
             let dst = base.add(scent0) as *mut bf16;
             dst.write(a);
@@ -191,9 +189,9 @@ mod ipc_macos {
         assert_eq!(gb.to_bits(), b.to_bits());
     }
 
-    // ── Phase C (formerly tests/phase_c_test.rs) ─────────────────────────────
+    // ── Phase C ─────────────────────────────────────────────────────────────
 
-    /// Mirrors `InhibitSlab::eval_cpu` (v4: full slot memset + INHIBITED + watchdog).
+    /// Mirrors `InhibitSlab::eval_cpu` (v5: full slot memset + INHIBITED, no separate watchdog u32).
     unsafe fn cpu_inhibit_slot(base: *mut u8, slot: usize) {
         assert!(slot < N_SLOTS);
         let b = base as usize;
@@ -201,12 +199,8 @@ mod ipc_macos {
         ptr::write_bytes((b + sb) as *mut u8, 0, SLOT_STRIDE);
         let st = (b + sb + OFF_S_SLOT_STATE) as *mut AtomicU32;
         (*st).store(SLOT_STATUS_INHIBITED, Ordering::Release);
-        let wd = (b + sb + OFF_S_WATCHDOG_FLAGS) as *mut u32;
-        wd.write_volatile(wd.read_volatile() | 0x1);
     }
 
-    /// Two threads contend on the same IOSurface mapping (same as cross-process atomics on shared
-    /// IOSurface memory).
     #[test]
     fn phase_c_claim_flag_atomic_single_winner() {
         let _serial = launchd_serial_lock();
@@ -288,8 +282,6 @@ mod ipc_macos {
 
             let w = (*claim).load(Ordering::Acquire);
             assert_eq!(slot_status(w), SLOT_STATUS_INHIBITED);
-            let wd = *((base.add(sb + OFF_S_WATCHDOG_FLAGS)) as *const u32);
-            assert!(wd & 0x1 != 0, "watchdog bit 0 should be set");
             assert_eq!(payload.read().to_bits(), bf16::from_f32(0.0).to_bits());
         }
     }
@@ -314,8 +306,6 @@ mod ipc_macos {
         unsafe {
             let claim_p = (hdr + OFF_S_CLAIM_FLAG) as *mut AtomicU32;
             (*claim_p).store(pack_slot_claimed(42), Ordering::Release);
-            // Stale Mach threshold: last_claim = 0 → immediate eviction on next decay tick.
-            // OFF_S_LAST_CLAIM_MACH=4: u64 is intentionally not 8-byte aligned in the v4 header.
             ((hdr + OFF_S_LAST_CLAIM_MACH) as *mut u64).write_unaligned(0);
         }
 

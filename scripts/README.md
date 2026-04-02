@@ -14,25 +14,26 @@ cd ~/dev/HiveClaw
 
 ---
 
-### Slab v4 (XPC `get_surface_v4`, 4224-byte slots, epochs)
+### Slab v5 (XPC `get_surface_v5`, 640-byte slots, 256-D SAE latent)
 
-**v3 is removed.** The PyO3 client must handshake with **`cmd=get_surface_v4`**; the daemon replies with **`surface_id`** and **`magic_version`** (`(SLAB_MAGIC << 32) | 4`). Legacy **`get_surface_id`** returns an **`error`** string and must not be used.
+The PyO3 client handshakes with **`cmd=get_surface_v5`**; the daemon replies with **`surface_id`** and **`magic_version`** (`0x48434C5700000005`). Any other command (including legacy surface handshakes) receives **`error`** = **`INVALID_COMMAND_OR_UNSUPPORTED_VERSION`**.
 
-**Layout:** each Phase-C slot is **4224 bytes**: 64-byte header (`slot_state` bitfield, Mach `last_claim` ticks, `front_epoch`), **2048×bf16** payload, 64-byte footer (`back_epoch` at byte offset 4160 from slot base, rest reserved). Writers bump **`front_epoch`**, copy the payload, then set **`back_epoch = front_epoch`**. Readers that see **`front_epoch != back_epoch`** must treat the sample as torn (Python uses **`read_scent_if_consistent`**; LLM active steering uses **`SlabClient.fused_steer`** on GPU with C++ stderr JSON: **`torn_epoch_skip`** / **`poison_clamp`**, suppressible via **`HIVECLAW_TELEMETRY=0`**). To force the **CPU** fused implementation (Metal off), set **`HIVECLAW_FUSED_GPU=0`**.
+**Layout:** global header **4096** bytes (magic `u64` @ 0, version `u32` @ 8, `n_slots` @ 12, `stride` @ 16). Each slot is **640** bytes: 64-byte header (`slot_state`, Mach `last_claim`, `front_epoch`), **256×bf16** payload (512 B), 64-byte footer with **`back_epoch` at +576** from slot base. Writers bump **`front_epoch`**, copy **512** B, set **`back_epoch`**. **`read_slot_v5` / `WriteSlab`** enforce torn detection (zeros on mismatch); C++ may emit **`torn_epoch_skip`** to stderr unless **`HIVECLAW_TELEMETRY=0`**. LLM scripts use a **trained SAE** in **`models/hiveclaw_sae_v1.safetensors`** (see `scripts/harvester.py`, `scripts/train_sae.py`).
 
 **Integration harness (subprocess-safe):** with `pheromoned` loaded and venv active:
 
 ```bash
-python scripts/integration_test.py          # XPC v4 + SlabClient smoke
+python scripts/integration_test.py          # XPC v5 + header + read_slot_v5 smoke
 python scripts/integration_test.py --quick  # same as default smoke path
-python scripts/integration_test.py --stress # optional: swarm_spike + SIGKILL
+python scripts/integration_test.py --stress # claim/release (256 slots) + swarm_spike + SIGKILL
+python scripts/integration_test.py --stress --stress-max-slots 4096   # full slab gauntlet
 ```
 
 ---
 
-### Phase C scent dimension (`get_scent_dim`)
+### Phase C latent dimension (`get_latent_dim`)
 
-Phase C slot scents are **bf16 vectors** whose length is **`SCENT_ELEMS`** in [`crates/hiveclaw-core/src/math.rs`](../crates/hiveclaw-core/src/math.rs) (currently **2048**, aligned with **Llama 3.2 1B** hidden size). At runtime, Python calls **`SlabClient.get_scent_dim()`** (compiled into the PyO3 extension) so scripts never hardcode the width.
+IOSurface slot payloads are **256×bf16** SAE latents (**`SCENT_ELEMS`** in [`crates/hiveclaw-core/src/math.rs`](../crates/hiveclaw-core/src/math.rs)). Python uses **`SlabClient.get_latent_dim()`** (and **`hiveclaw_mlx_ext.get_latent_dim()`**). **Llama 3.2 1B** hidden size remains **2048**; the SAE maps **2048 → 256** for the slab.
 
 **Any edit to `math.rs` (especially `SCENT_ELEMS`) is a breaking layout change.** You **must** rebuild everything and restart the daemon or Python and `pheromoned` will disagree on IOSurface layout:
 
@@ -49,7 +50,7 @@ make daemon-status
 
 ---
 
-The script runs **Agent A** (prefill → L2-normalized last-token hidden state) writing an **L2-normalized bf16 scent** (length = `get_scent_dim()`, 2048 for the default 1B model) to IOSurface slot 0, then **Agent B** generates with the final layer wrapped via **`fused_steer`** (epoch-checked slab read + L2 clamp + blend on GPU). See `scripts/intelligence_spike.py`.
+The script runs **Agent A** (prefill → SAE encode → **`write_slot_v5`**) on slot 0, then **Agent B** generates with **`read_slot_v5` → decode → L2 clamp → inject** on the last token. Requires **`models/hiveclaw_sae_v1.safetensors`**. See `scripts/intelligence_spike.py`.
 
 ### 1. Environment reset (Conda off)
 
@@ -212,7 +213,7 @@ Each `swarm_spike.py` instance races to claim slab slots, runs synthetic matmul 
 
 Multi-process test: **real** `mlx_lm` generation (default **`mlx-community/Llama-3.2-1B-Instruct-4bit`**) plus slab **sense → claim → generate (≤10 tokens) → write post-steer scent → release**. Each agent uses a **static goal vector** from a one-time prefill on its initial prompt; cosine pressure ranks unclaimed slots. **`--alpha`** tunes steering (default `0.1`). On EOS before 10 tokens, the agent picks a new prompt from a built-in pool.
 
-**Requirements:** Mac + Apple Silicon + GPU + `pheromoned` under launchd (no headless mock). The model’s **`hidden_size` from `config.json`** (via `mlx_lm.load(..., return_config=True)`) must equal **`get_scent_dim()`** — do not use quantized `embed_tokens.weight` shape, which can misreport (e.g. 256 vs 2048).
+**Requirements:** Mac + Apple Silicon + GPU + `pheromoned` under launchd (no headless mock). The model’s **`hidden_size` from `config.json`** must be **2048** for the default SAE (do not use `embed_tokens.weight` shape). **`get_latent_dim()`** is **256** (slab latent width).
 
 ### Four-terminal live integration test
 

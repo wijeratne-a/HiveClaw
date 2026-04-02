@@ -3,8 +3,8 @@
 use block2::{Block, RcBlock};
 use hiveclaw_backend_metal::MetalPheromoneBuffer;
 use hiveclaw_core::math::{
-    N_SLOTS, OFF_G_DECAY_RATE, OFF_G_MAGIC, OFF_G_N_SLOTS, OFF_G_SLOT_STRIDE, OFF_G_VERSION,
-    OFF_G_ZETA_T, PHASE_C_BYTES, SLAB_MAGIC, SLAB_SIZE, SLAB_VERSION_V4, SLOT_STRIDE,
+    N_SLOTS, OFF_G_DECAY_RATE, OFF_G_MAGIC_V5, OFF_G_N_SLOTS_V5, OFF_G_STRIDE_V5,
+    OFF_G_VERSION_V5, OFF_G_ZETA_T, PHASE_C_BYTES, SLAB_SIZE, SLAB_VERSION_V5,
     layout_magic_version_u64,
 };
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -77,8 +77,8 @@ unsafe fn is_connection_invalid(obj: XpcObjectT) -> bool {
     s.contains("Connection invalid") || s.contains("connection invalid")
 }
 
-/// Client: v4 handshake — IOSurface ID + packed `(magic << 32) | version`.
-pub fn fetch_surface_v4() -> Result<(u32, u64), String> {
+/// Client: v5 handshake — IOSurface ID + packed `(magic << 32) | version`.
+pub fn fetch_surface_v5() -> Result<(u32, u64), String> {
     let cname = CString::new("com.hiveclaw.pheromoned").map_err(|e| e.to_string())?;
     let conn = unsafe { xpc_connection_create_mach_service(cname.as_ptr(), ptr::null_mut(), 0) };
     if conn.is_null() {
@@ -120,7 +120,7 @@ pub fn fetch_surface_v4() -> Result<(u32, u64), String> {
         xpc_dictionary_set_string(
             dict,
             b"cmd\0".as_ptr().cast::<c_char>(),
-            b"get_surface_v4\0".as_ptr().cast::<c_char>(),
+            b"get_surface_v5\0".as_ptr().cast::<c_char>(),
         );
     }
 
@@ -178,19 +178,39 @@ pub fn fetch_surface_v4() -> Result<(u32, u64), String> {
     Ok((sid as u32, magic_version))
 }
 
-/// Client: synchronous RPC returning the daemon's IOSurface ID (v4 handshake).
+/// Client: synchronous RPC returning the daemon's IOSurface ID (v5 handshake).
 pub fn fetch_surface_id() -> Result<u32, String> {
-    fetch_surface_v4().map(|(id, _)| id)
+    fetch_surface_v5().map(|(id, _)| id)
+}
+
+/// After mapping the IOSurface, validate bytes 0–11 (u64 magic + u32 version).
+pub fn validate_mapped_global_header_v5(base: *const u8) -> Result<(), String> {
+    let magic = unsafe { (base as *const u64).read_unaligned() };
+    let ver = unsafe { (base.add(OFF_G_VERSION_V5) as *const u32).read_unaligned() };
+    if magic != hiveclaw_core::math::layout_magic_version_u64() {
+        return Err(format!(
+            "global header magic mismatch: got 0x{magic:x}, expected 0x{:x}",
+            layout_magic_version_u64()
+        ));
+    }
+    if ver != SLAB_VERSION_V5 {
+        return Err(format!(
+            "global header version mismatch: got {ver}, expected {SLAB_VERSION_V5}"
+        ));
+    }
+    Ok(())
 }
 
 /// Daemon entry: IOSurface slab + XPC listener (never returns).
 /// Writes Phase C global header after the slab has been zeroed.
 unsafe fn initialize_global_header(base: *mut u8, decay_rate: f32) {
     let p = base;
-    (p.add(OFF_G_MAGIC) as *mut u32).write_volatile(SLAB_MAGIC);
-    (p.add(OFF_G_VERSION) as *mut u32).write_volatile(SLAB_VERSION_V4);
-    (p.add(OFF_G_N_SLOTS) as *mut u32).write_volatile(N_SLOTS as u32);
-    (p.add(OFF_G_SLOT_STRIDE) as *mut u32).write_volatile(SLOT_STRIDE as u32);
+    (p.add(OFF_G_MAGIC_V5) as *mut u64).write_unaligned(layout_magic_version_u64());
+    (p.add(OFF_G_VERSION_V5) as *mut u32).write_unaligned(SLAB_VERSION_V5);
+    (p.add(OFF_G_N_SLOTS_V5) as *mut u32).write_unaligned(N_SLOTS as u32);
+    (p.add(OFF_G_STRIDE_V5) as *mut u32).write_unaligned(
+        hiveclaw_core::math::SLOT_STRIDE as u32,
+    );
     (p.add(OFF_G_ZETA_T) as *mut f32).write_volatile(0.0);
     (p.add(OFF_G_DECAY_RATE) as *mut f32).write_volatile(decay_rate);
 }
@@ -271,24 +291,11 @@ pub fn run_pheromoned_daemon() -> ! {
                         return;
                     }
 
-                    if cmd == "get_surface_id" {
+                    if cmd != "get_surface_v5" {
                         xpc_dictionary_set_string(
                             reply,
                             b"error\0".as_ptr().cast::<c_char>(),
-                            b"[VERSION_MISMATCH] v3 removed; use cmd get_surface_v4\0"
-                                .as_ptr()
-                                .cast::<c_char>(),
-                        );
-                        xpc_connection_send_message(peer, reply);
-                        xpc_release(reply);
-                        return;
-                    }
-
-                    if cmd != "get_surface_v4" {
-                        xpc_dictionary_set_string(
-                            reply,
-                            b"error\0".as_ptr().cast::<c_char>(),
-                            b"[UNKNOWN_CMD]\0".as_ptr().cast::<c_char>(),
+                            b"INVALID_COMMAND_OR_UNSUPPORTED_VERSION\0".as_ptr().cast::<c_char>(),
                         );
                         xpc_connection_send_message(peer, reply);
                         xpc_release(reply);

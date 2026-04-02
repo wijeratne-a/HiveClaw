@@ -1,60 +1,48 @@
-//! Shared layout constants (slab v4).
+//! Shared layout constants (slab v5).
 
 /// IOSurface-backed slab size (bytes) for the Phase 2 POC.
 pub const SLAB_SIZE: usize = 4_718_720;
 
-/// Slot 0: scalar probe region (f32×4) — byte offset from slab base.
-pub const SLOT0_SCALAR_BYTE_OFFSET: usize = 256;
+// ── Slab v5 (4096-byte global header, 640-byte slots, 256-D latent) ────────
 
-/// Slot 0: scent vector (bf16×`SLOT0_SCENT_ELEMS`) — byte offset from slab base.
-pub const SLOT0_SCENT_BYTE_OFFSET: usize = 384;
-
-/// Number of bf16 elements in slot 0 scent (kept in sync with `SCENT_ELEMS`).
-pub const SLOT0_SCENT_ELEMS: usize = 2048;
-
-// ── Phase C slab v4 (4224-byte slots, dual epochs) ─────────────────────────
-
-/// Magic `'HCLW'` in little-endian `u32`.
+/// Magic `'HCLW'` in little-endian `u32` (low 32 bits of packed magic).
 pub const SLAB_MAGIC: u32 = 0x4843_4C57;
-pub const SLAB_VERSION_V4: u32 = 4;
-/// Deprecated alias (v3 removed); use `SLAB_VERSION_V4`.
-pub const SLAB_VERSION_C: u32 = SLAB_VERSION_V4;
+pub const SLAB_VERSION_V5: u32 = 5;
 
-pub const GLOBAL_HDR_BYTES: usize = 128;
+pub const GLOBAL_HDR_BYTES: usize = 4096;
 pub const SLOT_HDR_BYTES: usize = 64;
-pub const SCENT_ELEMS: usize = 2048;
+pub const SCENT_ELEMS: usize = 256;
 pub const SCENT_BYTES: usize = SCENT_ELEMS * 2; // bf16
-/// Footer: `back_epoch` + 60 bytes reserved (64-byte tail).
 pub const SLOT_FOOTER_BYTES: usize = 64;
-pub const SLOT_STRIDE: usize = SLOT_HDR_BYTES + SCENT_BYTES + SLOT_FOOTER_BYTES; // 4224
-pub const N_SLOTS: usize = 32;
+pub const SLOT_STRIDE: usize = SLOT_HDR_BYTES + SCENT_BYTES + SLOT_FOOTER_BYTES; // 640
+pub const N_SLOTS: usize = 4096;
 pub const PHASE_C_BYTES: usize = GLOBAL_HDR_BYTES + N_SLOTS * SLOT_STRIDE;
 
 /// Stale held-slot eviction threshold (wall milliseconds), converted to Mach ticks in daemon.
 pub const STALE_LOCK_MS: u64 = 500;
 
-/// Packed XPC reply: `(magic as u64) << 32 | version`.
+/// Global header: packed `u64` magic+version for XPC (`0x48434C5700000005`).
 #[inline]
 pub const fn layout_magic_version_u64() -> u64 {
-    ((SLAB_MAGIC as u64) << 32) | (SLAB_VERSION_V4 as u64)
+    ((SLAB_MAGIC as u64) << 32) | (SLAB_VERSION_V5 as u64)
 }
 
-/// Byte offsets within GlobalHeader.
-pub const OFF_G_MAGIC: usize = 0;
-pub const OFF_G_VERSION: usize = 4;
-pub const OFF_G_N_SLOTS: usize = 8;
-pub const OFF_G_SLOT_STRIDE: usize = 12;
-pub const OFF_G_ZETA_T: usize = 16;
-pub const OFF_G_DECAY_RATE: usize = 20;
+// Global header field offsets (first 64 bytes used for contract fields)
+pub const OFF_G_MAGIC_V5: usize = 0; // u64
+pub const OFF_G_VERSION_V5: usize = 8; // u32
+pub const OFF_G_N_SLOTS_V5: usize = 12; // u32
+pub const OFF_G_STRIDE_V5: usize = 16; // u32
+/// Daemon decay: ζ clock (reserved region, not part of client contract).
+pub const OFF_G_ZETA_T: usize = 32;
+pub const OFF_G_DECAY_RATE: usize = 36;
 
-/// Slot header v4 (relative to slot base).
+/// Slot header v5 (relative to slot base).
 pub const OFF_S_SLOT_STATE: usize = 0;
 pub const OFF_S_LAST_CLAIM_MACH: usize = 4;
 pub const OFF_S_FRONT_EPOCH: usize = 12;
-pub const OFF_S_WATCHDOG_FLAGS: usize = 16;
 
-/// `back_epoch` u32 at end of scent payload (slot-relative).
-pub const OFF_SLOT_BACK_EPOCH: usize = SLOT_HDR_BYTES + SCENT_BYTES; // 4160
+/// `back_epoch` u32 immediately after 512-byte scent payload (slot-relative).
+pub const OFF_SLOT_BACK_EPOCH: usize = SLOT_HDR_BYTES + SCENT_BYTES; // 576
 
 pub const SLOT_STATUS_MASK: u32 = 0x3;
 pub const SLOT_STATUS_FREE: u32 = 0;
@@ -78,14 +66,8 @@ pub const fn slot_owner_id16(word: u32) -> u32 {
     (word >> SLOT_OWNER_SHIFT) & 0xFFFF
 }
 
-// Legacy v3 names — map to v4 fields where tests still import symbols.
+/// Alias for claim CAS offset (same as `OFF_S_SLOT_STATE`).
 pub const OFF_S_CLAIM_FLAG: usize = OFF_S_SLOT_STATE;
-pub const OFF_S_OWNER_ID: usize = OFF_S_SLOT_STATE;
-pub const OFF_S_LAST_WRITE_CLK: usize = OFF_S_LAST_CLAIM_MACH;
-pub const OFF_S_LAST_INHIBIT_CLK: usize = OFF_S_LAST_CLAIM_MACH;
-
-/// Deprecated: ζ-time stale delta; v4 uses Mach time in daemon.
-pub const STALE_LOCK_ZETA_DELTA: f32 = 0.35;
 
 #[inline]
 pub const fn slot_base(i: usize) -> usize {
@@ -97,10 +79,12 @@ pub const fn slot_payload(i: usize) -> usize {
     slot_base(i) + SLOT_HDR_BYTES
 }
 
-// Compile-time contract: keep Rust layout identical to hiveclaw_layout_v4.h
-const _: () = assert!(SLOT_STRIDE == 4224);
-const _: () = assert!(OFF_SLOT_BACK_EPOCH == 4160);
+// Compile-time contract: keep Rust layout identical to hiveclaw_layout_v5.h
+const _: () = assert!(PHASE_C_BYTES <= SLAB_SIZE);
+const _: () = assert!(GLOBAL_HDR_BYTES + 4095 * SLOT_STRIDE + SLOT_STRIDE <= SLAB_SIZE);
+const _: () = assert!(OFF_SLOT_BACK_EPOCH == 576);
+const _: () = assert!(SLOT_STRIDE == 640);
+const _: () = assert!(SCENT_BYTES == 512);
 const _: () = assert!(SLOT_HDR_BYTES == 64);
-const _: () = assert!(SCENT_BYTES == 4096);
 const _: () = assert!(SLOT_FOOTER_BYTES == 64);
 const _: () = assert!(PHASE_C_BYTES == GLOBAL_HDR_BYTES + N_SLOTS * SLOT_STRIDE);

@@ -9,6 +9,7 @@
 
 #include <stdexcept>
 
+#include "slab_layout.h"
 #include "slab_primitives.h"
 
 namespace nb = nanobind;
@@ -39,6 +40,8 @@ static Shape shape_from_seq(const Seq& s) {
 NB_MODULE(hiveclaw_mlx_ext, m) {
     // Ensure mlx.core is loaded first so NB_DOMAIN mlx recognizes Python mlx.core.array.
     (void)nb::module_::import_("mlx.core");
+
+    m.def("get_latent_dim", []() { return static_cast<int>(HCLW_SCENT_ELEMS); });
 
     nb::class_<SlabHandle>(m, "SlabHandle")
         .def(nb::init<uint32_t>(), nb::arg("surface_id"))
@@ -105,6 +108,17 @@ NB_MODULE(hiveclaw_mlx_ext, m) {
             nb::arg("scent_c"),
             nb::arg("dep") = nb::none())
         .def(
+            "write_slot_v5",
+            [](SlabHandle& self,
+               uint32_t slot_index,
+               array latent,
+               std::optional<array> dep) {
+                return self.write_slot_v5(slot_index, std::move(latent), std::move(dep));
+            },
+            nb::arg("slot_index"),
+            nb::arg("latent"),
+            nb::arg("dep") = nb::none())
+        .def(
             "read_slot",
             [](SlabHandle& self, uint32_t slot_index, nb::list shape_list) {
                 Shape sh = shape_from_seq(shape_list);
@@ -145,6 +159,19 @@ NB_MODULE(hiveclaw_mlx_ext, m) {
             nb::arg("shape"),
             nb::arg("dep"))
         .def(
+            "read_slot_v5",
+            [](SlabHandle& self, uint32_t slot_index) {
+                return self.read_slot_v5(slot_index, std::nullopt);
+            },
+            nb::arg("slot_index"))
+        .def(
+            "read_slot_v5",
+            [](SlabHandle& self, uint32_t slot_index, array dep) {
+                return self.read_slot_v5(slot_index, std::move(dep));
+            },
+            nb::arg("slot_index"),
+            nb::arg("dep"))
+        .def(
             "claim",
             [](SlabHandle& self, array candidates, uint32_t agent_id) {
                 return self.claim(std::move(candidates), agent_id, std::nullopt);
@@ -175,18 +202,5 @@ NB_MODULE(hiveclaw_mlx_ext, m) {
             nb::arg("agent_id"),
             nb::arg("dep"))
         .def("get_slot_states", [](SlabHandle& self) { return self.get_slot_states(); })
-        .def("release_slot", &SlabHandle::release_slot, nb::arg("slot_index"))
-        .def(
-            "fused_steer",
-            [](SlabHandle& self,
-               uint32_t slot_index,
-               array h_step,
-               float alpha,
-               std::optional<array> dep) {
-                return self.fused_steer(slot_index, std::move(h_step), alpha, std::move(dep));
-            },
-            nb::arg("slot_index"),
-            nb::arg("h_step"),
-            nb::arg("alpha"),
-            nb::arg("dep") = nb::none());
+        .def("release_slot", &SlabHandle::release_slot, nb::arg("slot_index"));
 }

@@ -1,102 +1,41 @@
 import sys
+from pathlib import Path
+
+_scripts_dir = Path(__file__).resolve().parent
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
 
 import mlx.core as mx
-import mlx.nn as nn
 from mlx_lm import load
 from mlx_lm.generate import generate_step
 from mlx_lm.sample_utils import make_sampler
 
-MODEL_ID = "mlx-community/Llama-3.2-1B-Instruct-4bit"
+from hiveclaw_steering import (
+    ActiveSteeringWrapper,
+    CaptureWrapper,
+    check_latent_dim,
+    load_sae,
+)
 
-# mlx-lm 0.31+: generate_step uses sampler= instead of temp=.
+MODEL_ID = "mlx-community/Llama-3.2-1B-Instruct-4bit"
+SAE_PATH = Path(__file__).resolve().parent.parent / "models/hiveclaw_sae_v1.safetensors"
+
 _SPIKE_SAMPLER = make_sampler(temp=0.0)
 FATAL_LINE = (
     "pheromoned is not running under launchd. From repo root: "
     "`cargo build --release -p hiveclaw-daemon` then `make daemon-load`. See scripts/README.md."
 )
 
-# Phase C: slot-indexed scent (layout in hiveclaw-core math.rs)
 SLOT_INDEX = 0
 
 
-class CaptureWrapper(nn.Module):
-    """
-    Captures the hidden state tensor at the model's final transformer layer.
-    """
-
-    def __init__(self, layer):
-        super().__init__()
-        # Bypass nn.Module.__setattr__: it uses hasattr(self, key), which triggers __getattr__
-        # before self.layer exists → infinite recursion.
-        object.__setattr__(self, "layer", layer)
-        object.__setattr__(self, "captured_h", None)
-
-    def __getattr__(self, name: str):
-        # mlx_lm LlamaModel reads e.g. layer.use_sliding when building masks; forward to the block.
-        if name in ("layer", "captured_h"):
-            return super().__getattr__(name)
-        try:
-            return getattr(self.layer, name)
-        except AttributeError:
-            return super().__getattr__(name)
-
-    def __call__(self, *args, **kwargs):
-        out = self.layer(*args, **kwargs)
-        object.__setattr__(
-            self, "captured_h", out[0] if isinstance(out, tuple) else out
-        )
-        return out
-
-
-class ActiveSteeringWrapper(nn.Module):
-    """
-    Wraps the final transformer layer.
-    On every forward: runs the layer, then `fused_steer` (GPU epoch check + L2 clamp + blend).
-    """
-
-    def __init__(self, layer, slab_client, scent_dim: int, alpha=0.1):
-        super().__init__()
-        object.__setattr__(self, "layer", layer)
-        object.__setattr__(self, "slab_client", slab_client)
-        object.__setattr__(self, "scent_dim", scent_dim)
-        object.__setattr__(self, "alpha", alpha)
-
-    def __getattr__(self, name: str):
-        if name in ("layer", "slab_client", "scent_dim", "alpha"):
-            return super().__getattr__(name)
-        try:
-            return getattr(self.layer, name)
-        except AttributeError:
-            return super().__getattr__(name)
-
-    def __call__(self, *args, **kwargs):
-        out = self.layer(*args, **kwargs)
-        h = out[0] if isinstance(out, tuple) else out
-
-        h_step = h[:, -1:, :]  # (batch, 1, D) — only steer last position
-
-        h_modified = self.slab_client.fused_steer(
-            SLOT_INDEX, h_step, self.alpha, depends=h_step
-        )
-
-        if h.shape[1] > 1:
-            h_final = mx.concatenate([h[:, :-1, :], h_modified], axis=1)
-        else:
-            h_final = h_modified
-
-        return (h_final,) + out[1:] if isinstance(out, tuple) else h_final
-
-
 def _config_hidden_size(config: dict) -> int:
-    """Architectural hidden size from Hugging Face config.json (not embedding weight shape)."""
     if "hidden_size" in config:
         return int(config["hidden_size"])
     tc = config.get("text_config")
     if isinstance(tc, dict) and "hidden_size" in tc:
         return int(tc["hidden_size"])
-    raise ValueError(
-        "Could not read hidden_size from model config (needed to match slab get_scent_dim)."
-    )
+    raise ValueError("Could not read hidden_size from model config.")
 
 
 def _encode_prompt(tokenizer, text):
@@ -111,25 +50,28 @@ def _encode_prompt(tokenizer, text):
 
 def main():
     try:
-        import hiveclaw_python  # provided by PyO3 / maturin
+        import hiveclaw_python
 
         slab_client = hiveclaw_python.SlabClient()
     except Exception:
         print(FATAL_LINE, file=sys.stderr)
         sys.exit(1)
 
-    d = slab_client.get_scent_dim()
+    check_latent_dim(slab_client)
+    sae = load_sae(SAE_PATH)
+    W_enc = sae["encoder.weight"]
+    b_enc = sae["encoder.bias"]
+    b_dec = sae["decoder.bias"]
+
     model, tokenizer, hf_config = load(MODEL_ID, return_config=True)
     try:
         hidden_size = _config_hidden_size(hf_config)
     except ValueError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
-    if hidden_size != d:
+    if hidden_size != 2048:
         print(
-            f"[ERROR] Model config hidden_size={hidden_size} does not match "
-            f"HiveClaw slab get_scent_dim()={d}. Use a model with hidden_size {d}, "
-            "or change SCENT_ELEMS in crates/hiveclaw-core/src/math.rs and rebuild.",
+            f"[ERROR] Model hidden_size={hidden_size}; SAE expects 2048 (Llama 3.2 1B).",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -137,8 +79,7 @@ def main():
     original_layer = model.model.layers[-1]
 
     try:
-        # ── Agent A: writer ──────────────────────────────
-        print("=== AGENT A: WRITING SCENT (cat) ===")
+        print("=== AGENT A: WRITING LATENT (cat) ===")
         prompt_a = _encode_prompt(tokenizer, "Write a short story about a cat.")
 
         wrapper_a = CaptureWrapper(original_layer)
@@ -146,25 +87,27 @@ def main():
         _ = model(prompt_a[None])
         mx.eval(wrapper_a.captured_h)
 
-        h_prompt_a = wrapper_a.captured_h[:, -1:, :]  # (1, 1, D)
-
-        eps = mx.array(1e-7, dtype=mx.bfloat16)
-        norm = mx.linalg.norm(
-            h_prompt_a.astype(mx.float32), ord=2, axis=-1, keepdims=True
-        ).astype(mx.bfloat16)
-        normalized_scent = (h_prompt_a / (norm + eps)).astype(mx.bfloat16)
-
-        write_node = slab_client.write_scent(SLOT_INDEX, normalized_scent.reshape(d))
+        d_latent = slab_client.get_latent_dim()
+        h_prompt_a = wrapper_a.captured_h[:, -1:, :].astype(mx.float32)
+        latent = mx.maximum(mx.matmul(h_prompt_a, mx.transpose(W_enc)) + b_enc, 0.0).astype(
+            mx.bfloat16
+        )
+        latent = latent.reshape(1, 1, d_latent)
+        write_node = slab_client.write_slot_v5(SLOT_INDEX, latent)
         mx.eval(write_node)
-        print(f"[INFO] Agent A wrote {d}-D 'cat' scent to IOSurface (GPU path).")
+        print(f"[INFO] Agent A wrote {d_latent}-D SAE latent to IOSurface (GPU path).")
 
-        # ── Agent B: reader ──────────────────────────────
-        print("\n=== AGENT B: GENERATING (dog + cat latent pressure) ===")
+        print("\n=== AGENT B: GENERATING (dog + latent pressure) ===")
         prompt_b = _encode_prompt(tokenizer, "Write a short story about a dog.")
 
-        alpha = 0.1  # conservative start; increase if tokens remain unaffected
+        alpha = 0.1
         wrapper_b = ActiveSteeringWrapper(
-            original_layer, slab_client, scent_dim=d, alpha=alpha
+            original_layer,
+            slab_client,
+            W_enc,
+            b_dec,
+            alpha=alpha,
+            slot_index=SLOT_INDEX,
         )
         model.model.layers[-1] = wrapper_b
 

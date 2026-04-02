@@ -2,8 +2,8 @@
 
 use hiveclaw_core::math::{
     N_SLOTS, OFF_G_DECAY_RATE, OFF_G_ZETA_T, OFF_S_LAST_CLAIM_MACH, OFF_S_SLOT_STATE,
-    OFF_S_WATCHDOG_FLAGS, SCENT_ELEMS, SLOT_STATUS_CLAIMED, SLOT_STATUS_FREE, SLOT_STRIDE,
-    STALE_LOCK_MS, slot_base, slot_payload, slot_status,
+    SCENT_ELEMS, SLOT_STATUS_CLAIMED, SLOT_STATUS_FREE, SLOT_STRIDE, STALE_LOCK_MS, slot_base,
+    slot_payload, slot_status,
 };
 use half::bf16;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -102,9 +102,6 @@ fn mach_now() -> u64 {
 unsafe fn force_evict_slot(base: *mut u8, slot_index: usize) {
     let p = base.add(slot_base(slot_index));
     std::ptr::write_bytes(p, 0, SLOT_STRIDE);
-
-    let watchdog = (base as usize + slot_base(slot_index) + OFF_S_WATCHDOG_FLAGS) as *mut u32;
-    watchdog.write_volatile(watchdog.read_volatile() | 0x1);
 }
 
 unsafe fn decay_slot_payload(base: *mut u8, slot_index: usize, scale: f32) {

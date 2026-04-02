@@ -1,9 +1,11 @@
-//! PyO3 bridge: `SlabClient` — XPC + IOSurface slab (BF16), Phase 4.
+//! PyO3 bridge: `SlabClient` — XPC + IOSurface slab (BF16), Phase 4 v5.
 
 use block2::{Block, RcBlock};
 use half::bf16;
 use hiveclaw_backend_metal::MetalPheromoneBuffer;
-use hiveclaw_core::math::{layout_magic_version_u64, SCENT_ELEMS, SLAB_SIZE};
+use hiveclaw_core::math::{
+    layout_magic_version_u64, OFF_G_VERSION_V5, SCENT_ELEMS, SLAB_SIZE, SLAB_VERSION_V5,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -66,7 +68,7 @@ impl Drop for XpcConn {
 
 unsafe impl Send for XpcConn {}
 
-fn connect_and_fetch_surface_v4() -> Result<(XpcConn, u32), String> {
+fn connect_and_fetch_surface_v5() -> Result<(XpcConn, u32), String> {
     let cname = CString::new("com.hiveclaw.pheromoned").map_err(|e| e.to_string())?;
     let conn = unsafe { xpc_connection_create_mach_service(cname.as_ptr(), ptr::null_mut(), 0) };
     if conn.is_null() {
@@ -108,7 +110,7 @@ fn connect_and_fetch_surface_v4() -> Result<(XpcConn, u32), String> {
         xpc_dictionary_set_string(
             dict,
             b"cmd\0".as_ptr().cast::<c_char>(),
-            b"get_surface_v4\0".as_ptr().cast::<c_char>(),
+            b"get_surface_v5\0".as_ptr().cast::<c_char>(),
         );
     }
 
@@ -191,12 +193,20 @@ pub struct SlabClient {
 impl SlabClient {
     #[new]
     pub fn new() -> PyResult<Self> {
-        let (xpc_conn, id) = connect_and_fetch_surface_v4().map_err(|e| {
+        let (xpc_conn, id) = connect_and_fetch_surface_v5().map_err(|e| {
             PyValueError::new_err(format!(
                 "XPC handshake failed (is pheromoned running under launchd?): {e}"
             ))
         })?;
         let buf = MetalPheromoneBuffer::from_surface_id(id);
+        let base = buf.base_ptr();
+        let magic = unsafe { ptr::read_unaligned(base as *const u64) };
+        let ver = unsafe { ptr::read_unaligned(base.add(OFF_G_VERSION_V5) as *const u32) };
+        if magic != layout_magic_version_u64() || ver != SLAB_VERSION_V5 {
+            return Err(PyValueError::new_err(
+                "Corrupted slab: global header validation failed",
+            ));
+        }
         Ok(Self {
             buf,
             _conn: xpc_conn,
@@ -249,16 +259,25 @@ impl SlabClient {
         Ok(out)
     }
 
-    /// Number of bf16 elements per Phase C scent slot (matches `SCENT_ELEMS` in `hiveclaw-core`).
-    pub fn get_scent_dim(&self) -> usize {
+    /// Number of bf16 latent elements per Phase C slot (256 for v5 SAE).
+    pub fn get_latent_dim(&self) -> usize {
         SCENT_ELEMS
     }
 
-    /// Read a little-endian `u32` from the mapped slab (for v4 epoch headers).
+    /// Read a little-endian `u32` from the mapped slab (epoch headers).
     pub fn read_u32_at(&self, byte_offset: usize) -> PyResult<u32> {
         bounds_end(byte_offset, 4)?;
         let base = self.buf.base_ptr();
         let v = unsafe { ptr::read_unaligned(base.add(byte_offset) as *const u32) };
+        fence(Ordering::Acquire);
+        Ok(v)
+    }
+
+    /// Read a little-endian `u64` from the mapped slab (global header magic).
+    pub fn read_u64_at(&self, byte_offset: usize) -> PyResult<u64> {
+        bounds_end(byte_offset, 8)?;
+        let base = self.buf.base_ptr();
+        let v = unsafe { ptr::read_unaligned(base.add(byte_offset) as *const u64) };
         fence(Ordering::Acquire);
         Ok(v)
     }
