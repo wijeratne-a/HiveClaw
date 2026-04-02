@@ -129,10 +129,18 @@ def main() -> None:
 
             scored: list[tuple[float, int]] = []
             for slot in unclaimed:
-                read_n = client.read_scent(slot, [d], like=like_bf16)
+                read_n = client.read_scent_if_consistent(
+                    slot, [d], like=like_bf16, context="swarm_spike_sense"
+                )
+                if read_n is None:
+                    continue
                 mx.eval(read_n)
                 cos = _cosine_read_np(read_n, goal_f32_1d)
                 scored.append((cos, slot))
+
+            if not scored:
+                time.sleep(random.uniform(0.001, 0.010))
+                continue
 
             scored.sort(key=lambda t: t[0], reverse=True)
             order = [s for _, s in scored]
@@ -144,7 +152,12 @@ def main() -> None:
                 time.sleep(random.uniform(0.001, 0.010))
                 continue
 
-            slot_scent = client.read_scent(slot, [d], like=like_bf16)
+            slot_scent = client.read_scent_if_consistent(
+                slot, [d], like=like_bf16, context="swarm_spike_hold"
+            )
+            if slot_scent is None:
+                client.release_task(slot)
+                continue
             mx.eval(slot_scent)
             slot_bf16_3d = slot_scent.reshape(1, 1, d)
             h = slot_bf16_3d.astype(mx.float32)

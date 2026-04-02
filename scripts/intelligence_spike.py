@@ -77,10 +77,9 @@ class ActiveSteeringWrapper(nn.Module):
 
         h_step = h[:, -1:, :]  # (batch, 1, D) — only steer last position
 
-        scent = self.slab_client.read_scent(
+        scent = self.slab_client.read_scent_for_steering(
             SLOT_INDEX,
-            [1, 1, d],
-            like=h_step,
+            h_step,
             depends=h_step,
         )
 

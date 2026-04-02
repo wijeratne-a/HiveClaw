@@ -39,7 +39,7 @@ class ClaimSlabTask : public mlx::core::UnaryPrimitive {
     uint32_t agent_id_;
 };
 
-/// Zeros slot payload, clears claim, sets watchdog bit 0, stamps last_inhibit_clock from global zeta.
+/// v4: memsets full slot stride, sets INHIBITED + watchdog bit 0 (no zeta clock).
 class InhibitSlab : public mlx::core::Primitive {
    public:
     InhibitSlab(MTL::Buffer* slab,

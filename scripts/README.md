@@ -14,6 +14,22 @@ cd ~/dev/HiveClaw
 
 ---
 
+### Slab v4 (XPC `get_surface_v4`, 4224-byte slots, epochs)
+
+**v3 is removed.** The PyO3 client must handshake with **`cmd=get_surface_v4`**; the daemon replies with **`surface_id`** and **`magic_version`** (`(SLAB_MAGIC << 32) | 4`). Legacy **`get_surface_id`** returns an **`error`** string and must not be used.
+
+**Layout:** each Phase-C slot is **4224 bytes**: 64-byte header (`slot_state` bitfield, Mach `last_claim` ticks, `front_epoch`), **2048×bf16** payload, 64-byte footer (`back_epoch` at byte offset 4160 from slot base, rest reserved). Writers bump **`front_epoch`**, copy the payload, then set **`back_epoch = front_epoch`**. Readers that see **`front_epoch != back_epoch`** must treat the sample as torn (scripts use **`read_scent_if_consistent`** / **`read_scent_for_steering`** and emit one-line JSON telemetry on stderr).
+
+**Integration harness (subprocess-safe):** with `pheromoned` loaded and venv active:
+
+```bash
+python scripts/integration_test.py          # XPC v4 + SlabClient smoke
+python scripts/integration_test.py --quick  # same as default smoke path
+python scripts/integration_test.py --stress # optional: swarm_spike + SIGKILL
+```
+
+---
+
 ### Phase C scent dimension (`get_scent_dim`)
 
 Phase C slot scents are **bf16 vectors** whose length is **`SCENT_ELEMS`** in [`crates/hiveclaw-core/src/math.rs`](../crates/hiveclaw-core/src/math.rs) (currently **2048**, aligned with **Llama 3.2 1B** hidden size). At runtime, Python calls **`SlabClient.get_scent_dim()`** (compiled into the PyO3 extension) so scripts never hardcode the width.

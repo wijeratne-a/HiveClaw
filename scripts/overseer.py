@@ -72,9 +72,11 @@ def main() -> None:
                     history[slot_idx].clear()
                     continue
 
-                scent_bf16 = client.read_scent(
-                    slot_idx, [d], like=like_proto
+                scent_bf16 = client.read_scent_if_consistent(
+                    slot_idx, [d], like=like_proto, context="overseer"
                 )
+                if scent_bf16 is None:
+                    continue
                 scent_f32 = scent_bf16.astype(mx.float32)
                 mx.eval(scent_f32)
                 sample = np.array(scent_f32, dtype=np.float32)

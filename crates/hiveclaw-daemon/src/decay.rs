@@ -1,15 +1,47 @@
 //! Background CPU decay loop for Phase C slab slots (daemon only).
 
 use hiveclaw_core::math::{
-    N_SLOTS, OFF_G_DECAY_RATE, OFF_G_ZETA_T, OFF_S_CLAIM_FLAG, OFF_S_LAST_WRITE_CLK,
-    OFF_S_LAST_INHIBIT_CLK, OFF_S_WATCHDOG_FLAGS, SCENT_ELEMS, STALE_LOCK_ZETA_DELTA, slot_base,
-    slot_payload,
+    N_SLOTS, OFF_G_DECAY_RATE, OFF_G_ZETA_T, OFF_S_LAST_CLAIM_MACH, OFF_S_SLOT_STATE,
+    OFF_S_WATCHDOG_FLAGS, SCENT_ELEMS, SLOT_STATUS_CLAIMED, SLOT_STATUS_FREE, SLOT_STRIDE,
+    STALE_LOCK_MS, slot_base, slot_payload, slot_status,
 };
 use half::bf16;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct MachTimebaseInfo {
+    numer: u32,
+    denom: u32,
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn mach_absolute_time() -> u64;
+    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
+}
+
+fn stale_threshold_mach_ticks() -> u64 {
+    static THRESH: OnceLock<u64> = OnceLock::new();
+    *THRESH.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
+            if mach_timebase_info(&mut info) != 0 || info.numer == 0 || info.denom == 0 {
+                return 0;
+            }
+            // ns = ticks * numer / denom  =>  ticks = ns * denom / numer
+            let ns = STALE_LOCK_MS.saturating_mul(1_000_000);
+            ns.saturating_mul(info.denom as u64) / info.numer as u64
+        }
+        #[cfg(not(target_os = "macos"))]
+        0u64
+    })
+}
 
 /// Start a detached thread that periodically advances `global_zeta_t`, decays unclaimed slot
-/// payloads, and force-evicts stale locks.
+/// payloads, and force-evicts stale held slots (Mach time).
 pub fn start_decay_loop(base: *mut u8, tick_ms: u64) {
     let base_usize = base as usize;
     std::thread::spawn(move || loop {
@@ -32,38 +64,47 @@ unsafe fn decay_tick(base: *mut u8) {
 
     let scale = (new_zeta - zeta).exp();
 
+    let threshold = stale_threshold_mach_ticks();
+    let now = mach_now();
+
     for i in 0..N_SLOTS {
         let hdr_base = base as usize + slot_base(i);
-        let claim_ptr = (hdr_base + OFF_S_CLAIM_FLAG) as *const AtomicU32;
-        if (*claim_ptr).load(Ordering::Acquire) == 1 {
-            let clk_ptr = (hdr_base + OFF_S_LAST_WRITE_CLK) as *const f32;
-            let clk = clk_ptr.read_volatile();
-            // ζ-time since last write: |ζ_now − ζ_at_write| (both in global ζ coordinates).
-            if (new_zeta - clk).abs() >= STALE_LOCK_ZETA_DELTA {
-                force_evict(base, i, new_zeta);
+        let state_ptr = (hdr_base + OFF_S_SLOT_STATE) as *const AtomicU32;
+        let word = (*state_ptr).load(Ordering::Acquire);
+        let st = slot_status(word);
+
+        if st == SLOT_STATUS_CLAIMED {
+            let mach_ptr = (hdr_base + OFF_S_LAST_CLAIM_MACH) as *const u64;
+            let last = mach_ptr.read_unaligned();
+            if threshold > 0 && now >= last && now - last >= threshold {
+                force_evict_slot(base, i);
             }
             continue;
         }
 
-        decay_slot_payload(base, i, scale);
+        if st == SLOT_STATUS_FREE {
+            decay_slot_payload(base, i, scale);
+        }
+        // INHIBITED / FAULT: do not decay payload
     }
 }
 
-unsafe fn force_evict(base: *mut u8, slot_index: usize, zeta: f32) {
-    let hdr_base = base as usize + slot_base(slot_index);
-    let claim_ptr = (hdr_base + OFF_S_CLAIM_FLAG) as *mut AtomicU32;
-    (*claim_ptr).store(0, Ordering::Release);
+#[cfg(target_os = "macos")]
+fn mach_now() -> u64 {
+    unsafe { mach_absolute_time() }
+}
 
-    let watchdog = (hdr_base + OFF_S_WATCHDOG_FLAGS) as *mut u32;
+#[cfg(not(target_os = "macos"))]
+fn mach_now() -> u64 {
+    0
+}
+
+unsafe fn force_evict_slot(base: *mut u8, slot_index: usize) {
+    let p = base.add(slot_base(slot_index));
+    std::ptr::write_bytes(p, 0, SLOT_STRIDE);
+
+    let watchdog = (base as usize + slot_base(slot_index) + OFF_S_WATCHDOG_FLAGS) as *mut u32;
     watchdog.write_volatile(watchdog.read_volatile() | 0x1);
-
-    let inh = (hdr_base + OFF_S_LAST_INHIBIT_CLK) as *mut f32;
-    inh.write_volatile(zeta);
-
-    let payload = (base as usize + slot_payload(slot_index)) as *mut bf16;
-    for j in 0..SCENT_ELEMS {
-        payload.add(j).write(bf16::from_f32(0.0));
-    }
 }
 
 unsafe fn decay_slot_payload(base: *mut u8, slot_index: usize, scale: f32) {

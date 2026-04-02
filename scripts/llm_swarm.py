@@ -101,9 +101,9 @@ class ActiveSteeringWrapper(nn.Module):
         h = out[0] if isinstance(out, tuple) else out
         h_step = h[:, -1:, :]
 
-        scent = self.slab_client.read_scent(
+        scent = self.slab_client.read_scent_for_steering(
             int(self.current_slot),
-            [1, 1, self.D],
+            h_step,
             depends=h_step,
         )
         h_modified = h_step + (scent * self.alpha)
@@ -232,9 +232,17 @@ def main() -> None:
 
             scored: list[tuple[float, int]] = []
             for slot in unclaimed:
-                scent = slab_client.read_scent(slot, [d])
+                scent = slab_client.read_scent_if_consistent(
+                    slot, [d], context="llm_swarm_sense"
+                )
+                if scent is None:
+                    continue
                 mx.eval(scent)
                 scored.append((_cosine_np(scent, goal_np), slot))
+
+            if not scored:
+                time.sleep(random.uniform(0.001, 0.010))
+                continue
 
             scored.sort(key=lambda t: t[0], reverse=True)
             order = [s for _, s in scored]

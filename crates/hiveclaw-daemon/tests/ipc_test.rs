@@ -12,8 +12,10 @@ mod ipc_macos {
     use half::bf16;
     use hiveclaw_backend_metal::MetalPheromoneBuffer;
     use hiveclaw_core::math::{
-        N_SLOTS, OFF_G_ZETA_T, OFF_S_CLAIM_FLAG, OFF_S_LAST_INHIBIT_CLK, OFF_S_LAST_WRITE_CLK,
-        OFF_S_WATCHDOG_FLAGS, SCENT_ELEMS, SLOT0_SCALAR_BYTE_OFFSET, slot_base, slot_payload,
+        N_SLOTS, OFF_G_ZETA_T, OFF_S_CLAIM_FLAG, OFF_S_LAST_CLAIM_MACH, OFF_S_SLOT_STATE,
+        OFF_S_WATCHDOG_FLAGS, SCENT_ELEMS, SLOT0_SCALAR_BYTE_OFFSET, SLOT_STATUS_CLAIMED,
+        SLOT_STATUS_INHIBITED, SLOT_STRIDE, pack_slot_claimed, slot_base, slot_payload,
+        slot_status,
     };
     use hiveclaw_daemon::xpc::fetch_surface_id;
     use std::fs;
@@ -191,22 +193,16 @@ mod ipc_macos {
 
     // ── Phase C (formerly tests/phase_c_test.rs) ─────────────────────────────
 
-    /// Mirrors `InhibitSlab::eval_cpu` layout (validates C++/Rust ABI alignment).
+    /// Mirrors `InhibitSlab::eval_cpu` (v4: full slot memset + INHIBITED + watchdog).
     unsafe fn cpu_inhibit_slot(base: *mut u8, slot: usize) {
         assert!(slot < N_SLOTS);
         let b = base as usize;
         let sb = slot_base(slot);
-        let claim = (b + sb + OFF_S_CLAIM_FLAG) as *mut AtomicU32;
-        (*claim).store(0, Ordering::Release);
+        ptr::write_bytes((b + sb) as *mut u8, 0, SLOT_STRIDE);
+        let st = (b + sb + OFF_S_SLOT_STATE) as *mut AtomicU32;
+        (*st).store(SLOT_STATUS_INHIBITED, Ordering::Release);
         let wd = (b + sb + OFF_S_WATCHDOG_FLAGS) as *mut u32;
         wd.write_volatile(wd.read_volatile() | 0x1);
-        let zeta = (b + OFF_G_ZETA_T) as *const f32;
-        let inh = (b + sb + OFF_S_LAST_INHIBIT_CLK) as *mut f32;
-        inh.write_volatile(zeta.read_volatile());
-        let payload = (b + slot_payload(slot)) as *mut u16;
-        for i in 0..SCENT_ELEMS {
-            payload.add(i).write_volatile(0);
-        }
     }
 
     /// Two threads contend on the same IOSurface mapping (same as cross-process atomics on shared
@@ -232,15 +228,17 @@ mod ipc_macos {
         let barrier = Arc::new(std::sync::Barrier::new(3));
 
         let mut handles = Vec::new();
-        for _ in 0..2 {
+        for tid in 0..2 {
             let w = Arc::clone(&wins);
             let b = Arc::clone(&barrier);
+            let owner = (tid as u32) + 1;
             handles.push(thread::spawn(move || {
                 b.wait();
                 let p = claim_off as *mut AtomicU32;
+                let desired = pack_slot_claimed(owner);
                 unsafe {
                     if (*p)
-                        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
+                        .compare_exchange(0, desired, Ordering::AcqRel, Ordering::Relaxed)
                         .is_ok()
                     {
                         w.fetch_add(1, Ordering::SeqCst);
@@ -260,7 +258,7 @@ mod ipc_macos {
             "exactly one contender should win the claim CAS"
         );
         let held = unsafe { (*(claim_off as *const AtomicU32)).load(Ordering::Acquire) };
-        assert_eq!(held, 1);
+        assert_eq!(slot_status(held), SLOT_STATUS_CLAIMED);
     }
 
     #[test]
@@ -282,13 +280,14 @@ mod ipc_macos {
         unsafe {
             let sb = slot_base(slot);
             let claim = (base.add(sb + OFF_S_CLAIM_FLAG)) as *mut AtomicU32;
-            (*claim).store(1, Ordering::Release);
+            (*claim).store(pack_slot_claimed(1), Ordering::Release);
             let payload = (base.add(slot_payload(slot))) as *mut bf16;
             payload.write(bf16::from_f32(1.25));
 
             cpu_inhibit_slot(base, slot);
 
-            assert_eq!((*claim).load(Ordering::Acquire), 0);
+            let w = (*claim).load(Ordering::Acquire);
+            assert_eq!(slot_status(w), SLOT_STATUS_INHIBITED);
             let wd = *((base.add(sb + OFF_S_WATCHDOG_FLAGS)) as *const u32);
             assert!(wd & 0x1 != 0, "watchdog bit 0 should be set");
             assert_eq!(payload.read().to_bits(), bf16::from_f32(0.0).to_bits());
@@ -314,17 +313,18 @@ mod ipc_macos {
 
         unsafe {
             let claim_p = (hdr + OFF_S_CLAIM_FLAG) as *mut AtomicU32;
-            (*claim_p).store(1, Ordering::Release);
-            ((hdr + OFF_S_LAST_WRITE_CLK) as *mut f32).write_volatile(0.0);
+            (*claim_p).store(pack_slot_claimed(42), Ordering::Release);
+            // Stale Mach threshold: last_claim = 0 → immediate eviction on next decay tick.
+            // OFF_S_LAST_CLAIM_MACH=4: u64 is intentionally not 8-byte aligned in the v4 header.
+            ((hdr + OFF_S_LAST_CLAIM_MACH) as *mut u64).write_unaligned(0);
         }
 
-        // ~0.051 |Δζ| per 100ms tick; threshold STALE_LOCK_ZETA_DELTA needs many ticks.
-        thread::sleep(Duration::from_millis(3500));
+        thread::sleep(Duration::from_millis(500));
 
         let claim = unsafe {
             let claim_p = (hdr + OFF_S_CLAIM_FLAG) as *const AtomicU32;
             (*claim_p).load(Ordering::Acquire)
         };
-        assert_eq!(claim, 0, "daemon watchdog should evict stale lock");
+        assert_eq!(claim, 0, "daemon should evict stale held slot (Mach time)");
     }
 }

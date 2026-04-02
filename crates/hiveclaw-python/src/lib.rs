@@ -3,7 +3,7 @@
 use block2::{Block, RcBlock};
 use half::bf16;
 use hiveclaw_backend_metal::MetalPheromoneBuffer;
-use hiveclaw_core::math::{SCENT_ELEMS, SLAB_SIZE};
+use hiveclaw_core::math::{layout_magic_version_u64, SCENT_ELEMS, SLAB_SIZE};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -39,6 +39,7 @@ unsafe extern "C" {
     fn xpc_dictionary_create_empty() -> XpcObjectT;
     fn xpc_dictionary_set_string(dict: XpcObjectT, key: *const c_char, value: *const c_char);
     fn xpc_dictionary_get_uint64(dict: XpcObjectT, key: *const c_char) -> u64;
+    fn xpc_dictionary_get_string(dict: XpcObjectT, key: *const c_char) -> *const c_char;
 }
 
 unsafe fn is_xpc_type(obj: XpcObjectT, name: &[u8]) -> bool {
@@ -65,7 +66,7 @@ impl Drop for XpcConn {
 
 unsafe impl Send for XpcConn {}
 
-fn connect_and_fetch_surface_id() -> Result<(XpcConn, u32), String> {
+fn connect_and_fetch_surface_v4() -> Result<(XpcConn, u32), String> {
     let cname = CString::new("com.hiveclaw.pheromoned").map_err(|e| e.to_string())?;
     let conn = unsafe { xpc_connection_create_mach_service(cname.as_ptr(), ptr::null_mut(), 0) };
     if conn.is_null() {
@@ -107,7 +108,7 @@ fn connect_and_fetch_surface_id() -> Result<(XpcConn, u32), String> {
         xpc_dictionary_set_string(
             dict,
             b"cmd\0".as_ptr().cast::<c_char>(),
-            b"get_surface_id\0".as_ptr().cast::<c_char>(),
+            b"get_surface_v4\0".as_ptr().cast::<c_char>(),
         );
     }
 
@@ -123,14 +124,45 @@ fn connect_and_fetch_surface_id() -> Result<(XpcConn, u32), String> {
         return Err("xpc_connection_send_message_with_reply_sync returned NULL".into());
     }
 
+    let err_ptr = unsafe {
+        xpc_dictionary_get_string(
+            reply,
+            b"error\0".as_ptr().cast::<c_char>(),
+        )
+    };
+    if !err_ptr.is_null() {
+        let msg = unsafe { CStr::from_ptr(err_ptr).to_string_lossy().into_owned() };
+        unsafe {
+            xpc_release(reply);
+            xpc_release(conn as XpcObjectT);
+        }
+        return Err(msg);
+    }
+
     let sid = unsafe {
         xpc_dictionary_get_uint64(
             reply,
             b"surface_id\0".as_ptr().cast::<c_char>(),
         )
     };
+    let magic_version = unsafe {
+        xpc_dictionary_get_uint64(
+            reply,
+            b"magic_version\0".as_ptr().cast::<c_char>(),
+        )
+    };
     unsafe {
         xpc_release(reply);
+    }
+
+    let expected = layout_magic_version_u64();
+    if magic_version != expected {
+        unsafe {
+            xpc_release(conn as XpcObjectT);
+        }
+        return Err(format!(
+            "layout magic_version mismatch: got 0x{magic_version:x}, expected 0x{expected:x}"
+        ));
     }
 
     Ok((XpcConn(conn), sid as u32))
@@ -159,7 +191,7 @@ pub struct SlabClient {
 impl SlabClient {
     #[new]
     pub fn new() -> PyResult<Self> {
-        let (xpc_conn, id) = connect_and_fetch_surface_id().map_err(|e| {
+        let (xpc_conn, id) = connect_and_fetch_surface_v4().map_err(|e| {
             PyValueError::new_err(format!(
                 "XPC handshake failed (is pheromoned running under launchd?): {e}"
             ))
@@ -220,6 +252,15 @@ impl SlabClient {
     /// Number of bf16 elements per Phase C scent slot (matches `SCENT_ELEMS` in `hiveclaw-core`).
     pub fn get_scent_dim(&self) -> usize {
         SCENT_ELEMS
+    }
+
+    /// Read a little-endian `u32` from the mapped slab (for v4 epoch headers).
+    pub fn read_u32_at(&self, byte_offset: usize) -> PyResult<u32> {
+        bounds_end(byte_offset, 4)?;
+        let base = self.buf.base_ptr();
+        let v = unsafe { ptr::read_unaligned(base.add(byte_offset) as *const u32) };
+        fence(Ordering::Acquire);
+        Ok(v)
     }
 }
 

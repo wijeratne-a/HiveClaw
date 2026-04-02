@@ -4,7 +4,8 @@ use block2::{Block, RcBlock};
 use hiveclaw_backend_metal::MetalPheromoneBuffer;
 use hiveclaw_core::math::{
     N_SLOTS, OFF_G_DECAY_RATE, OFF_G_MAGIC, OFF_G_N_SLOTS, OFF_G_SLOT_STRIDE, OFF_G_VERSION,
-    OFF_G_ZETA_T, PHASE_C_BYTES, SLAB_MAGIC, SLAB_SIZE, SLAB_VERSION_C, SLOT_STRIDE,
+    OFF_G_ZETA_T, PHASE_C_BYTES, SLAB_MAGIC, SLAB_SIZE, SLAB_VERSION_V4, SLOT_STRIDE,
+    layout_magic_version_u64,
 };
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
@@ -76,8 +77,8 @@ unsafe fn is_connection_invalid(obj: XpcObjectT) -> bool {
     s.contains("Connection invalid") || s.contains("connection invalid")
 }
 
-/// Client: synchronous RPC returning the daemon's IOSurface ID.
-pub fn fetch_surface_id() -> Result<u32, String> {
+/// Client: v4 handshake — IOSurface ID + packed `(magic << 32) | version`.
+pub fn fetch_surface_v4() -> Result<(u32, u64), String> {
     let cname = CString::new("com.hiveclaw.pheromoned").map_err(|e| e.to_string())?;
     let conn = unsafe { xpc_connection_create_mach_service(cname.as_ptr(), ptr::null_mut(), 0) };
     if conn.is_null() {
@@ -119,7 +120,7 @@ pub fn fetch_surface_id() -> Result<u32, String> {
         xpc_dictionary_set_string(
             dict,
             b"cmd\0".as_ptr().cast::<c_char>(),
-            b"get_surface_id\0".as_ptr().cast::<c_char>(),
+            b"get_surface_v4\0".as_ptr().cast::<c_char>(),
         );
     }
 
@@ -135,10 +136,31 @@ pub fn fetch_surface_id() -> Result<u32, String> {
         return Err("xpc_connection_send_message_with_reply_sync returned NULL".into());
     }
 
+    let err_ptr = unsafe {
+        xpc_dictionary_get_string(
+            reply,
+            b"error\0".as_ptr().cast::<c_char>(),
+        )
+    };
+    if !err_ptr.is_null() {
+        let msg = unsafe { CStr::from_ptr(err_ptr).to_string_lossy().into_owned() };
+        unsafe {
+            xpc_release(reply);
+            xpc_release(conn as XpcObjectT);
+        }
+        return Err(msg);
+    }
+
     let sid = unsafe {
         xpc_dictionary_get_uint64(
             reply,
             b"surface_id\0".as_ptr().cast::<c_char>(),
+        )
+    };
+    let magic_version = unsafe {
+        xpc_dictionary_get_uint64(
+            reply,
+            b"magic_version\0".as_ptr().cast::<c_char>(),
         )
     };
     unsafe {
@@ -146,7 +168,19 @@ pub fn fetch_surface_id() -> Result<u32, String> {
         xpc_release(conn as XpcObjectT);
     }
 
-    Ok(sid as u32)
+    let expected = layout_magic_version_u64();
+    if magic_version != expected {
+        return Err(format!(
+            "layout magic_version mismatch: got 0x{magic_version:x}, expected 0x{expected:x}"
+        ));
+    }
+
+    Ok((sid as u32, magic_version))
+}
+
+/// Client: synchronous RPC returning the daemon's IOSurface ID (v4 handshake).
+pub fn fetch_surface_id() -> Result<u32, String> {
+    fetch_surface_v4().map(|(id, _)| id)
 }
 
 /// Daemon entry: IOSurface slab + XPC listener (never returns).
@@ -154,7 +188,7 @@ pub fn fetch_surface_id() -> Result<u32, String> {
 unsafe fn initialize_global_header(base: *mut u8, decay_rate: f32) {
     let p = base;
     (p.add(OFF_G_MAGIC) as *mut u32).write_volatile(SLAB_MAGIC);
-    (p.add(OFF_G_VERSION) as *mut u32).write_volatile(SLAB_VERSION_C);
+    (p.add(OFF_G_VERSION) as *mut u32).write_volatile(SLAB_VERSION_V4);
     (p.add(OFF_G_N_SLOTS) as *mut u32).write_volatile(N_SLOTS as u32);
     (p.add(OFF_G_SLOT_STRIDE) as *mut u32).write_volatile(SLOT_STRIDE as u32);
     (p.add(OFF_G_ZETA_T) as *mut f32).write_volatile(0.0);
@@ -232,18 +266,44 @@ pub fn run_pheromoned_daemon() -> ! {
                         Ok(s) => s,
                         Err(_) => return,
                     };
-                    if cmd != "get_surface_id" {
-                        return;
-                    }
-
                     let reply = xpc_dictionary_create_reply(msg);
                     if reply.is_null() {
                         return;
                     }
+
+                    if cmd == "get_surface_id" {
+                        xpc_dictionary_set_string(
+                            reply,
+                            b"error\0".as_ptr().cast::<c_char>(),
+                            b"[VERSION_MISMATCH] v3 removed; use cmd get_surface_v4\0"
+                                .as_ptr()
+                                .cast::<c_char>(),
+                        );
+                        xpc_connection_send_message(peer, reply);
+                        xpc_release(reply);
+                        return;
+                    }
+
+                    if cmd != "get_surface_v4" {
+                        xpc_dictionary_set_string(
+                            reply,
+                            b"error\0".as_ptr().cast::<c_char>(),
+                            b"[UNKNOWN_CMD]\0".as_ptr().cast::<c_char>(),
+                        );
+                        xpc_connection_send_message(peer, reply);
+                        xpc_release(reply);
+                        return;
+                    }
+
                     xpc_dictionary_set_uint64(
                         reply,
                         b"surface_id\0".as_ptr().cast::<c_char>(),
                         u64::from(sid),
+                    );
+                    xpc_dictionary_set_uint64(
+                        reply,
+                        b"magic_version\0".as_ptr().cast::<c_char>(),
+                        layout_magic_version_u64(),
                     );
                     xpc_connection_send_message(peer, reply);
                     xpc_release(reply);

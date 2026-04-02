@@ -3,8 +3,10 @@
 #include "slab_layout.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mach/mach_time.h>
 #include <stdexcept>
 
 #include <mlx/allocator.h>
@@ -35,17 +37,6 @@ kernel void copy_bf16(
   dst[index] = src[index];
 }
 
-kernel void write_slot_scent_bf16(
-    const device uint16_t* src [[buffer(0)]],
-    device uint16_t* dst [[buffer(1)]],
-    const device float* zeta_ptr [[buffer(2)]],
-    device float* clk_ptr [[buffer(3)]],
-    uint idx [[thread_position_in_grid]]) {
-  dst[idx] = src[idx];
-  if (idx == 0u) {
-    *clk_ptr = *zeta_ptr;
-  }
-}
 )";
 
 } // namespace
@@ -73,7 +64,7 @@ array SlabHandle::write_slot(uint32_t slot_index,
         throw std::runtime_error("write_slot: slot_index out of range");
     }
     const size_t byte_offset = slot_payload(slot_index);
-    Stream s = default_stream(Device::gpu);
+    Stream s = default_stream(Device::cpu);
     const size_t nbytes = scent_c.nbytes();
     auto prim = std::make_shared<WriteSlab>(
         slab_buf_, byte_offset, nbytes, s, slot_index);
@@ -148,17 +139,29 @@ void WriteSlab::eval_cpu(const std::vector<array>& inputs, array& out) {
         throw std::runtime_error("WriteSlab: input size mismatch");
     }
     void* dst = static_cast<char*>(slab_buf_->contents()) + byte_offset_;
-    std::memcpy(dst, in.data<const uint8_t>(), num_bytes_);
     if (stamp_slot_index_ != 0xFFFFFFFFu) {
         char* base = static_cast<char*>(slab_buf_->contents());
-        float zeta = *reinterpret_cast<float*>(base + OFF_G_ZETA_T);
-        *reinterpret_cast<float*>(
-            base + slot_base(stamp_slot_index_) + OFF_S_LAST_WRITE_CLK) = zeta;
+        size_t sb = slot_base(stamp_slot_index_);
+        char* sh = base + sb;
+        auto* fe = reinterpret_cast<std::atomic<uint32_t>*>(sh + OFF_S_FRONT_EPOCH);
+        uint32_t e = fe->load(std::memory_order_relaxed) + 1u;
+        fe->store(e, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_release);
+        std::memcpy(dst, in.data<const uint8_t>(), num_bytes_);
+        std::atomic_thread_fence(std::memory_order_release);
+        *reinterpret_cast<uint32_t*>(sh + static_cast<size_t>(HCLW_OFF_SLOT_BACK_EPOCH)) = e;
+        *reinterpret_cast<uint64_t*>(sh + OFF_S_LAST_CLAIM_MACH) = mach_absolute_time();
+    } else {
+        std::memcpy(dst, in.data<const uint8_t>(), num_bytes_);
     }
     out.copy_shared_buffer(in);
 }
 
 void WriteSlab::eval_gpu(const std::vector<array>& inputs, array& out) {
+    if (stamp_slot_index_ != 0xFFFFFFFFu) {
+        eval_cpu(inputs, out);
+        return;
+    }
     auto& in = inputs[0];
     auto& d = mlx::core::metal::device(stream().device);
     auto& enc = d.get_command_encoder(stream().index);
@@ -168,22 +171,10 @@ void WriteSlab::eval_gpu(const std::vector<array>& inputs, array& out) {
     size_t n = in.size();
     size_t tgp = std::min(n, static_cast<size_t>(256));
 
-    if (stamp_slot_index_ != 0xFFFFFFFFu) {
-        auto* kernel = d.get_kernel("write_slot_scent_bf16", lib);
-        enc.set_compute_pipeline_state(kernel);
-        enc.set_input_array(in, 0);
-        enc.set_buffer(slab_buf_, 1, static_cast<int64_t>(byte_offset_));
-        int64_t zeta_off = static_cast<int64_t>(OFF_G_ZETA_T);
-        int64_t clk_off = static_cast<int64_t>(
-            slot_base(stamp_slot_index_) + OFF_S_LAST_WRITE_CLK);
-        enc.set_buffer(slab_buf_, 2, zeta_off);
-        enc.set_buffer(slab_buf_, 3, clk_off);
-    } else {
-        auto* kernel = d.get_kernel("copy_bf16", lib);
-        enc.set_compute_pipeline_state(kernel);
-        enc.set_input_array(in, 0);
-        enc.set_buffer(slab_buf_, 1, static_cast<int64_t>(byte_offset_));
-    }
+    auto* kernel = d.get_kernel("copy_bf16", lib);
+    enc.set_compute_pipeline_state(kernel);
+    enc.set_input_array(in, 0);
+    enc.set_buffer(slab_buf_, 1, static_cast<int64_t>(byte_offset_));
 
     enc.dispatch_threads(MTL::Size(static_cast<NS::UInteger>(n), 1, 1),
                          MTL::Size(static_cast<NS::UInteger>(tgp), 1, 1));

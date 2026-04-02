@@ -1,5 +1,8 @@
+import json
 import math
 import os
+import sys
+import time
 
 import mlx.core as mx
 
@@ -15,6 +18,22 @@ except ImportError as e:  # pragma: no cover
 
 _SLAB_SIZE = 4_718_720
 _N_SLOTS = 32
+# Slab v4 Phase-C (must match hiveclaw-core math.rs)
+_PHASE_C_GLOBAL_HDR = 128
+_SLOT_STRIDE_V4 = 4224
+_OFF_S_FRONT_EPOCH = 12
+_OFF_SLOT_BACK_EPOCH = 4160
+
+
+def _telemetry_log(obj: dict) -> None:
+    o = dict(obj)
+    o.setdefault("ts_ns", time.time_ns())
+    sys.stderr.write(json.dumps(o, separators=(",", ":")) + "\n")
+    sys.stderr.flush()
+
+
+def _slot_byte_base(slot_index: int) -> int:
+    return _PHASE_C_GLOBAL_HDR + int(slot_index) * _SLOT_STRIDE_V4
 
 
 def _validate_write(byte_offset: int, scent: mx.array) -> None:
@@ -67,6 +86,88 @@ class SlabClient(_SlabClientBase):
     def get_scent_dim(self) -> int:
         """Number of bf16 elements per Phase C scent slot (compiled `SCENT_ELEMS` in math.rs)."""
         return int(super().get_scent_dim())
+
+    def read_scent_if_consistent(
+        self,
+        slot_index: int,
+        shape: list,
+        *,
+        like=None,
+        depends=None,
+        context: str = "read",
+    ):
+        """Read scent only if front_epoch == back_epoch before and after the read; else None."""
+        _validate_slot(slot_index)
+        st = _shape_list(shape)
+        sb = _slot_byte_base(slot_index)
+        fe = self.read_u32_at(sb + _OFF_S_FRONT_EPOCH)
+        be = self.read_u32_at(sb + _OFF_SLOT_BACK_EPOCH)
+        if fe != be:
+            _telemetry_log(
+                {
+                    "event": "torn_epoch_skip",
+                    "context": context,
+                    "slot_id": int(slot_index),
+                    "front_epoch": fe,
+                    "back_epoch": be,
+                    "stage": "pre",
+                }
+            )
+            return None
+        arr = self.read_scent(slot_index, st, like=like, depends=depends)
+        fe2 = self.read_u32_at(sb + _OFF_S_FRONT_EPOCH)
+        be2 = self.read_u32_at(sb + _OFF_SLOT_BACK_EPOCH)
+        if fe2 != fe or be2 != be or fe2 != be2:
+            _telemetry_log(
+                {
+                    "event": "torn_epoch_skip",
+                    "context": context,
+                    "slot_id": int(slot_index),
+                    "front_epoch": fe2,
+                    "back_epoch": be2,
+                    "stage": "post",
+                }
+            )
+            return None
+        return arr
+
+    def read_scent_for_steering(self, slot_index: int, h_step: mx.array, *, depends=None):
+        """Epoch-checked slab read for active steering; torn read => zero tensor (silent swarm)."""
+        _validate_slot(slot_index)
+        sb = _slot_byte_base(slot_index)
+        fe = self.read_u32_at(sb + _OFF_S_FRONT_EPOCH)
+        be = self.read_u32_at(sb + _OFF_SLOT_BACK_EPOCH)
+        if fe != be:
+            _telemetry_log(
+                {
+                    "event": "torn_read_steering_zero",
+                    "slot_id": int(slot_index),
+                    "front_epoch": fe,
+                    "back_epoch": be,
+                    "stage": "pre",
+                }
+            )
+            return mx.zeros_like(h_step)
+        dep = depends if depends is not None else h_step
+        scent = self.read_scent(
+            slot_index,
+            [1, 1, int(h_step.shape[-1])],
+            depends=dep,
+        )
+        fe2 = self.read_u32_at(sb + _OFF_S_FRONT_EPOCH)
+        be2 = self.read_u32_at(sb + _OFF_SLOT_BACK_EPOCH)
+        if fe2 != fe or be2 != be or fe2 != be2:
+            _telemetry_log(
+                {
+                    "event": "torn_read_steering_zero",
+                    "slot_id": int(slot_index),
+                    "front_epoch": fe2,
+                    "back_epoch": be2,
+                    "stage": "post",
+                }
+            )
+            return mx.zeros_like(h_step)
+        return scent
 
     def write_scent(
         self, slot_index: int, scent: mx.array, *, depends=None
