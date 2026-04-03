@@ -258,3 +258,84 @@ Multi-process test: **real** `mlx_lm` generation (default **`mlx-community/Llama
 - [ ] **Immune system:** With default overseer timing (~500 ms × 5 samples), killing an agent mid-hold (**Ctrl+C**, no cleanup handler) should eventually lead to **`INHIBIT`** on that slot as variance collapses.
 
 Do not merge the feature branch to `main` until this checklist is green in your environment.
+
+---
+
+## Phase 5 — FastAPI server + TUI dashboard
+
+OpenAI-compatible **`POST /v1/chat/completions`** (streaming and non-streaming), **`GET /health`**, and a JSON snapshot **`GET /v1/slots`**. The server loads the SAE, connects to **`pheromoned`**, and runs **Llama 3.2 1B** with **`ActiveSteeringWrapper`** from `scripts/hiveclaw_steering.py`. **`MAX_CONCURRENT = 1`** serializes MLX work (safe layer swap); scale-out is a follow-on.
+
+### Install server + dashboard deps
+
+```bash
+cd ~/dev/HiveClaw
+source .venv/bin/activate
+pip install -r scripts/requirements-server.txt
+```
+
+Requires the same MLX spike venv + `make python` as Phase 4A, and **`models/hiveclaw_sae_v1.safetensors`**.
+
+### Run daemon + API
+
+```bash
+cd ~/dev/HiveClaw
+cargo build --release -p hiveclaw-daemon
+make daemon-load
+make daemon-status
+```
+
+**API (blocking tab):**
+
+```bash
+cd ~/dev/HiveClaw
+source .venv/bin/activate
+python scripts/hiveclaw_server.py --host 127.0.0.1 --port 8080
+```
+
+Or with uvicorn directly (lifespan loads MLX + slab on startup):
+
+```bash
+cd ~/dev/HiveClaw
+source .venv/bin/activate
+uvicorn hiveclaw_server:app --app-dir scripts --host 127.0.0.1 --port 8080
+```
+
+**Dashboard (another tab):**
+
+```bash
+cd ~/dev/HiveClaw
+source .venv/bin/activate
+python scripts/hiveclaw_dashboard.py --refresh-ms 1000 --max-slots 64
+```
+
+Optional: point at a JSON-lines log for telemetry counts (e.g. redirect daemon stderr, or aggregate logs that contain `{"event":"poison_clamp",...}` / `torn_epoch_skip`):
+
+```bash
+python scripts/hiveclaw_dashboard.py --max-slots 32 --telemetry-log /tmp/hiveclaw_telem.log
+```
+
+### curl examples
+
+```bash
+curl -s http://127.0.0.1:8080/health
+```
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"hiveclaw-llama-1b","messages":[{"role":"user","content":"Tell me about bees"}],"max_tokens":128}'
+```
+
+Streaming (SSE):
+
+```bash
+curl -N -X POST http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"hiveclaw-llama-1b","messages":[{"role":"user","content":"Hi"}],"max_tokens":64,"stream":true}'
+```
+
+Optional body fields: **`temperature`** (default `0.8`), **`alpha`** steering strength (default `0.1`, matches `hiveclaw_steering`).
+
+### Client `base_url`
+
+Use **`http://127.0.0.1:8080/v1`** as the OpenAI-compatible base URL for LangChain / OpenAI SDKs.

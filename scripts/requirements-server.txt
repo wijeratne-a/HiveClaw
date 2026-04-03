@@ -1,0 +1,5 @@
+# Phase 5: FastAPI server + TUI dashboard (install alongside scripts/requirements-spike.txt)
+fastapi>=0.111
+uvicorn[standard]>=0.29
+sse-starlette>=1.8
+rich>=13.0
