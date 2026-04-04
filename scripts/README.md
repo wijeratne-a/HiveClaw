@@ -32,7 +32,7 @@ python scripts/integration_test.py --batched   # read_slots / write_slots (daemo
 
 **Phase 6 batched steering:** `scripts/test_batched_steering.py` exercises `read_slots`, `write_slots`, and `steer_hidden_batched` (requires daemon + `models/hiveclaw_sae_v1.safetensors`). Do **not** run MLX integration or batched tests while **`scripts/harvester.py`** (or another Metal-heavy workload) is using the same GPU — contention can flake reads/writes. **`make python`** only builds native extensions; it never runs those tests.
 
-**Phase 7 continuous batching:** Set **`HIVECLAW_CONTINUOUS_BATCH=1`** and install **`scripts/requirements-server.txt`** (includes **`mlx-lm`** pin). **`python scripts/hiveclaw_server.py`** then uses a **`swarm_batch_worker`** thread and **`stream=true`** only. Helpers: **`scripts/generate_batch.py`**; tests: **`scripts/test_continuous_batching.py`** (KV slice/pad; optional golden via **`HIVECLAW_PHASE7_GOLDEN=1`**). See **`docs/adr/BATCHED_STEERING_CONTRACT.md`** Phase 7.
+**Phase 7 continuous batching:** Set **`HIVECLAW_CONTINUOUS_BATCH=1`** and install **`scripts/requirements-server.txt`** (includes **`mlx-lm`** pin). **`python scripts/hiveclaw_server.py`** then uses a **`swarm_batch_worker`** thread and **`stream=true`** only. Helpers: **`scripts/generate_batch.py`**, **`scripts/hiveclaw_kv_mask.py`** (`HiveClawKVCache` masks). Tests: **`scripts/test_continuous_batching.py`** (KV slice/pad, mask shapes; optional golden via **`HIVECLAW_PHASE7_GOLDEN=1`**). Optional **`HIVECLAW_COMPILE_DECODE=1`** (experimental compiled decode; falls back to eager on error), **`HIVECLAW_COMPILE_WARMUP=1`** (see ADR). See **`docs/adr/BATCHED_STEERING_CONTRACT.md`** Phase 7.
 
 ---
 

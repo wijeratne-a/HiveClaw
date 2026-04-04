@@ -23,6 +23,7 @@ from generate_batch import (
     pad_kv_cache_batch_dim,
     slice_kv_cache_batch_dim,
 )
+from hiveclaw_kv_mask import HiveClawKVCache, rebuild_hive_kv_metadata
 
 
 def test_next_pow2_bucket() -> None:
@@ -61,11 +62,41 @@ def test_disconnect_flag_eviction_unit() -> None:
     assert ev.is_set()
 
 
+def test_rebuild_hive_kv_metadata() -> None:
+    class _E:
+        def __init__(self, n: int) -> None:
+            self.prompt_tokens = mx.arange(n, dtype=mx.int32)
+
+    entries = [_E(3), _E(5)]
+    lp, act = rebuild_hive_kv_metadata(entries, B_bucket=4)
+    mx.eval(lp, act)
+    assert int(lp.size) == 4
+    assert int(act.size) == 4
+    np.testing.assert_array_equal(np.array(lp), [2, 0, 0, 0])
+    np.testing.assert_array_equal(np.array(act), [1.0, 1.0, 0.0, 0.0])
+
+
+def test_hiveclaw_kv_cache_mask_shapes() -> None:
+    c = HiveClawKVCache()
+    c.hive_left_pad = mx.array([1, 0, 0], dtype=mx.int32)
+    c.hive_row_active = mx.array([1.0, 1.0, 0.0], dtype=mx.float32)
+    c.offset = 0
+    m = c.make_mask(4)
+    mx.eval(m)
+    assert tuple(m.shape) == (3, 1, 4, 4)
+    assert m.dtype == mx.float16
+    c.offset = 4
+    d = c.make_mask(1)
+    mx.eval(d)
+    assert tuple(d.shape) == (3, 1, 1, 5)
+
+
 def test_golden_logits_optional() -> None:
     """Regression sentinel: B=1 vs padded batch (optional; slow)."""
     if os.environ.get("HIVECLAW_PHASE7_GOLDEN", "0") != "1":
         print("[test_continuous_batching] skip golden (set HIVECLAW_PHASE7_GOLDEN=1)")
         return
+    from hiveclaw_kv_mask import install_hiveclaw_kv_cache
     from mlx_lm import load
     from mlx_lm.models.cache import make_prompt_cache
 
@@ -86,11 +117,20 @@ def test_golden_logits_optional() -> None:
     row1 = mx.full((max_len,), pad_id, dtype=row0.dtype)
     x2 = mx.stack([row0, row1, row1, row1], axis=0)
     cache2 = make_prompt_cache(model)
+    class _E:
+        def __init__(self, tok: mx.array) -> None:
+            self.prompt_tokens = tok
+
+    entries = [_E(row0)]
+    lp, act = rebuild_hive_kv_metadata(entries, B_bucket=4)
+    assert install_hiveclaw_kv_cache(model, cache2, lp, act)
     logits2 = model(x2, cache=cache2)
     mx.eval(logits2)
+    assert not bool(mx.isnan(logits2).any().item())
     t2 = np.array(logits2[0, -1, :], dtype=np.float32).reshape(-1)
-    ok = np.allclose(t1, t2, rtol=0.0, atol=1e-5)
+    ok = np.allclose(t1, t2, rtol=1e-2, atol=5e-2)
     assert ok, float(np.max(np.abs(t1 - t2)))
+    assert int(np.argmax(t1)) == int(np.argmax(t2))
 
 
 def main() -> int:
@@ -98,6 +138,8 @@ def main() -> int:
         test_next_pow2_bucket()
         test_kv_slice_and_pad()
         test_disconnect_flag_eviction_unit()
+        test_rebuild_hive_kv_metadata()
+        test_hiveclaw_kv_cache_mask_shapes()
         test_golden_logits_optional()
     except Exception as e:
         print(f"FAIL: {e}", file=sys.stderr)

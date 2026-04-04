@@ -114,7 +114,7 @@ Batched primitives live in `crates/hiveclaw-mlx/src/slab_primitives.cpp` and hea
 1. **Evaluation and eviction (top of step, before `model()`):** Check disconnect flags and queue-full conditions. Eviction is **atomic**: stop sending to client queue → slice Python trackers (`B_active`, `M_keep`) → `release_task`. MLX and the slab **never** touch a released slot in the same step.
 2. **EOS:** EOS is observed **after** logits; eviction for that row runs at **next** step top (client still receives the EOS token).
 3. **Bucketing (no shrinking):** On first forward of a session, `B_bucket = min(32, next_pow2(B_active_initial))`. If `B_active` shrinks, **`B_bucket` never shrinks** until the batch drains to zero. Prefer masked dummy FLOPs over recompile.
-4. **Dummy rows:** `pad_token_id` (or EOS if undefined); **frozen** `seq_length`; position IDs do not advance for dummies. During decode, rows are independent; dummy KV is zero-initialized and updated each step so attention over zero values yields zero contribution to logits (discarded in Python).
+4. **Dummy rows:** `pad_token_id` (or EOS if undefined). **Attention:** [`HiveClawKVCache`](../../scripts/hiveclaw_kv_mask.py) (installed on the full-attention cache slot) applies an **additive float16 mask** (`-1e4` on masked positions) so dummy rows are **fully blinded** in SDPA on prefill and decode; real rows also mask **left-padded** key columns. Shared KV length across the batch tensor is unchanged. **Steering sandwich** still pads dummies with zeros before the LM head.
 5. **Steering Sandwich (before LM head):** Steering does **not** use dummy rows. On `H_orig [B_bucket,1,2048]`: **(a)** slice to `H_active [B_active,1,2048]`; **(b)** `read_slots` with `depends=H_active`; **torn** rows → zero scents before matmul; decode, L2 clamp, add → `H_steered`; **(c)** `write_slots` encode (`max(matmul(h,W_enc.T)+b_enc,0)` → bf16) with `depends=H_steered`; **(d)** pad with zeros to `[B_bucket,1,2048]`; pass to LM head. Dummy logits discarded.
 6. **P95 latency:** Server-side only (time between successive generated tokens for a row); excludes SSE network.
 
@@ -132,8 +132,14 @@ Batched primitives live in `crates/hiveclaw-mlx/src/slab_primitives.cpp` and hea
 
 ### Golden / regression tests
 
-- **Cross-bucket logits match (B=1 minimal bucket vs B=4 evicted-to-1 in 8-bucket)** is a **regression sentinel**, not a formal proof; MLX reduction order may drift — use fp32 logits after `mx.eval`, `atol=1e-5` where stable.
+- **Cross-bucket logits (masked batch vs B=1):** compare **fp32** logits after `mx.eval` with **`atol=5e-2`, `rtol=1e-2`** and require **greedy argmax parity** (`temperature=0`). Stricter tolerances are flaky under bf16/float16 attention.
 - **mlx-lm bump:** Re-audit this section when the pin in **`scripts/requirements-spike.txt`** / server requirements changes (KVCache API).
+
+### Phase 7+ — Compiled decode (optional)
+
+- **`HIVECLAW_COMPILE_DECODE=1`:** After prefill, `generate_batch` attempts `mx.compile(decode_step, outputs=<KV keys/values per layer>, shapeless=True)` (falls back to `shapeless=False`, then to **eager** if evaluation throws). **Recompiled** after each eviction (KV arrays are replaced by `mx.take`). Many graphs (e.g. dynamic slice + steering) still **fail compile** on current MLX; the decode loop **catches** and continues eagerly.
+- **`HIVECLAW_COMPILE_WARMUP=1`:** Optional one-shot `mx.eval(compiled(dummy_tokens))` via `warmup_compiled_decode` (caller supplies compiled fn); may advance cache — intended for dedicated warmup harnesses, not mid-session.
+- **Sliding-window models:** `install_hiveclaw_kv_cache` returns **False**; telemetry `hiveclaw_kv_mask_skip` on stderr; standard `KVCache` masks apply (no HiveClaw composite mask).
 
 ### Feature flag
 

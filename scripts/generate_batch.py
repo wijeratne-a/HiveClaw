@@ -10,17 +10,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import queue
 import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import mlx.core as mx
 import numpy as np
 
+from hiveclaw_kv_mask import (
+    install_hiveclaw_kv_cache,
+    rebuild_hive_kv_metadata,
+    sync_hive_metadata_to_fa_cache,
+)
 from hiveclaw_steering import BatchedSteeringWrapper
 
 try:
@@ -76,7 +82,8 @@ def build_left_padded_batch(
 ) -> mx.array:
     """Stack 1-D token arrays left-padded to max length; pad batch dim to ``B_bucket``.
 
-    v1 limitation: padded positions are not masked in attention (use similar-length prompts).
+    When :func:`install_hiveclaw_kv_cache` succeeds, :class:`HiveClawKVCache` supplies
+    composite additive masks so padded columns and dummy rows are blinded in attention.
     """
     lens = [int(p.size) for p in prompts]
     max_len = max(lens)
@@ -106,6 +113,58 @@ def _eval_cache_states(kv_cache: list[Any]) -> None:
             states.append(c.state)
     if states:
         mx.eval(*states)
+
+
+def _kv_compile_output_arrays(kv_cache: list[Any]) -> list[mx.array]:
+    """Arrays mlx-lm mutates in-place during ``model(..., cache=)`` (for ``mx.compile``)."""
+    out: list[mx.array] = []
+    for c in kv_cache:
+        keys = getattr(c, "keys", None)
+        if keys is not None:
+            out.append(keys)
+            out.append(c.values)
+    return out
+
+
+def _try_compile_decode_step(
+    model: Any, kv_cache: list[Any]
+) -> Callable[[mx.array], mx.array] | None:
+    """Return compiled single-token decode fn, or ``None`` if disabled / unsupported."""
+    if os.environ.get("HIVECLAW_COMPILE_DECODE", "0") != "1":
+        return None
+    outputs = _kv_compile_output_arrays(kv_cache)
+    if len(outputs) < 2:
+        return None
+
+    def decode_step(ny: mx.array) -> mx.array:
+        return model(ny, cache=kv_cache)
+
+    try:
+        return mx.compile(decode_step, outputs=outputs, shapeless=True)
+    except Exception:
+        try:
+            return mx.compile(decode_step, outputs=outputs, shapeless=False)
+        except Exception:
+            return None
+
+
+def warmup_compiled_decode(
+    compiled_fn: Callable[[mx.array], mx.array] | None,
+    *,
+    B_bucket: int,
+    pad_id: int,
+) -> None:
+    """Run one ``mx.eval`` on a compiled decode fn (set ``HIVECLAW_COMPILE_WARMUP=1`` at startup)."""
+    if (
+        compiled_fn is None
+        or os.environ.get("HIVECLAW_COMPILE_WARMUP", "0") != "1"
+    ):
+        return
+    try:
+        dummy = mx.full((B_bucket, 1), pad_id, dtype=mx.int32)
+        mx.eval(compiled_fn(dummy))
+    except Exception:
+        pass
 
 
 @dataclass
@@ -313,6 +372,20 @@ def generate_batch_session(
     prompts = [e.prompt_tokens for e in entries]
     x = build_left_padded_batch(prompts, pad_id, B_bucket)
     cache = make_prompt_cache(model)
+    lp, act = rebuild_hive_kv_metadata(entries, B_bucket)
+    if not install_hiveclaw_kv_cache(model, cache, lp, act):
+        sys.stderr.write(
+            json.dumps(
+                {
+                    "event": "hiveclaw_kv_mask_skip",
+                    "reason": "sliding_window_attention",
+                    "ts_ns": time.time_ns(),
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        sys.stderr.flush()
     batch_slots = mx.array([e.slot_id for e in entries], dtype=mx.int32)
     alpha = float(entries[0].alpha)
 
@@ -329,11 +402,13 @@ def generate_batch_session(
     model.model.layers[-1] = steering
 
     eos_pending: set[int] = set()
+    compiled_decode: Callable[[mx.array], mx.array] | None = None
 
     try:
         logits = model(x, cache=cache)
         _eval_cache_states(cache)
         mx.eval(logits)
+        compiled_decode = _try_compile_decode_step(model, cache)
 
         t = mx.argmax(logits[:, -1, :], axis=-1)
         t = _apply_dummy_token_mask(t, B_active0, B_bucket, pad_id)
@@ -351,6 +426,9 @@ def generate_batch_session(
                 return
             m_keep0 = [i for i in range(B_active0) if i not in to_drop0]
             tok_line = tok_line[m_keep0]
+            lp0, act0 = rebuild_hive_kv_metadata(entries, B_bucket)
+            sync_hive_metadata_to_fa_cache(cache, model, lp0, act0)
+            compiled_decode = _try_compile_decode_step(model, cache)
 
         B_active = len(entries)
         if B_active == 0:
@@ -381,6 +459,9 @@ def generate_batch_session(
                 )
                 if emptied:
                     break
+                lp1, act1 = rebuild_hive_kv_metadata(entries, B_bucket)
+                sync_hive_metadata_to_fa_cache(cache, model, lp1, act1)
+                compiled_decode = _try_compile_decode_step(model, cache)
 
             B_active = len(entries)
             if B_active == 0:
@@ -389,9 +470,20 @@ def generate_batch_session(
             batch_slots = mx.array([e.slot_id for e in entries], dtype=mx.int32)
             object.__setattr__(steering, "current_batch_slots", batch_slots)
 
-            logits = model(next_y, cache=cache)
-            _eval_cache_states(cache)
-            mx.eval(logits)
+            if compiled_decode is not None:
+                try:
+                    logits = compiled_decode(next_y)
+                    _eval_cache_states(cache)
+                    mx.eval(logits)
+                except Exception:
+                    compiled_decode = None
+                    logits = model(next_y, cache=cache)
+                    _eval_cache_states(cache)
+                    mx.eval(logits)
+            else:
+                logits = model(next_y, cache=cache)
+                _eval_cache_states(cache)
+                mx.eval(logits)
 
             t = mx.argmax(logits[:, -1, :], axis=-1)
             t = _apply_dummy_token_mask(t, B_active, B_bucket, pad_id)
