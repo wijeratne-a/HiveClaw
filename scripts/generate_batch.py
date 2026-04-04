@@ -64,10 +64,12 @@ def probe_max_batch(model_id: str, env_max: int, probe_ctx_len: int) -> int:
     finally:
         if tmp_model is not None:
             del tmp_model
+        # Dual flush: graph/frontend allocations, then Metal unified memory (post-probe margin).
         if hasattr(mx, "clear_cache"):
             mx.clear_cache()
-        else:
-            mx.metal.clear_cache()
+        metal = getattr(mx, "metal", None)
+        if metal is not None and hasattr(metal, "clear_cache"):
+            metal.clear_cache()
     return last_ok if last_ok > 0 else 1
 
 
