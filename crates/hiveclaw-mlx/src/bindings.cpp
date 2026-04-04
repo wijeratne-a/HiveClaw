@@ -5,7 +5,11 @@
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
+#include <cstdint>
+#include <vector>
+
 #include <mlx/array.h>
+#include <mlx/mlx.h>
 
 #include <stdexcept>
 
@@ -35,6 +39,27 @@ static Shape shape_from_seq(const Seq& s) {
         v.push_back(nb::cast<int>(s[i]));
     }
     return list_to_shape(v);
+}
+
+static std::vector<uint32_t> slots_array_to_indices(const array& slot_indices) {
+    mlx::core::eval({slot_indices});
+    if (slot_indices.dtype() != mlx::core::int32) {
+        throw std::invalid_argument("slot_indices must be int32 mlx.array");
+    }
+    if (slot_indices.ndim() != 1) {
+        throw std::invalid_argument("slot_indices must be 1-D [B]");
+    }
+    const int32_t* p = slot_indices.data<int32_t>();
+    const size_t n = static_cast<size_t>(slot_indices.size());
+    std::vector<uint32_t> out;
+    out.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        if (p[i] < 0) {
+            throw std::invalid_argument("slot_indices must be non-negative");
+        }
+        out.push_back(static_cast<uint32_t>(p[i]));
+    }
+    return out;
 }
 
 NB_MODULE(hiveclaw_mlx_ext, m) {
@@ -170,6 +195,45 @@ NB_MODULE(hiveclaw_mlx_ext, m) {
                 return self.read_slot_v5(slot_index, std::move(dep));
             },
             nb::arg("slot_index"),
+            nb::arg("dep"))
+        .def(
+            "read_slots_v5",
+            [](SlabHandle& self, array slot_indices) {
+                return self.read_slots_v5(
+                    slots_array_to_indices(slot_indices), std::nullopt);
+            },
+            nb::arg("slot_indices"))
+        .def(
+            "read_slots_v5",
+            [](SlabHandle& self, array slot_indices, array dep) {
+                return self.read_slots_v5(
+                    slots_array_to_indices(slot_indices), std::move(dep));
+            },
+            nb::arg("slot_indices"),
+            nb::arg("dep"))
+        .def(
+            "write_slots_v5",
+            [](SlabHandle& self, array slot_indices, array latents) {
+                return self.write_slots_v5(
+                    slots_array_to_indices(slot_indices),
+                    std::move(latents),
+                    std::nullopt);
+            },
+            nb::arg("slot_indices"),
+            nb::arg("latents"))
+        .def(
+            "write_slots_v5",
+            [](SlabHandle& self,
+               array slot_indices,
+               array latents,
+               array dep) {
+                return self.write_slots_v5(
+                    slots_array_to_indices(slot_indices),
+                    std::move(latents),
+                    std::move(dep));
+            },
+            nb::arg("slot_indices"),
+            nb::arg("latents"),
             nb::arg("dep"))
         .def(
             "claim",

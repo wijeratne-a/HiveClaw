@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import json
+import os
 import random
 import sys
 import threading
@@ -61,6 +62,11 @@ class ServerContext:
     b_dec: mx.array
     d_latent: int
     hf_config: dict
+    # Phase 7 continuous batching (optional)
+    master_queue: Any = None
+    batch_worker_thread: Any = None
+    batch_worker_stop: Any = None
+    max_client_queue_depth: int = 50
 
 
 def _config_hidden_size(config: dict) -> int:
@@ -403,12 +409,38 @@ def _sync_stream_chunks_unlocked(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
-    app.state.ctx = await loop.run_in_executor(None, _sync_startup)
+    ctx = await loop.run_in_executor(None, _sync_startup)
+    app.state.ctx = ctx
     app.state.sem = asyncio.Semaphore(MAX_CONCURRENT)
     app.state.executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="hiveclaw_mlx"
     )
+    continuous = os.environ.get("HIVECLAW_CONTINUOUS_BATCH", "0") == "1"
+    app.state.continuous_batch = continuous
+    if continuous:
+        from generate_batch import start_swarm_batch_worker
+
+        ctx.max_client_queue_depth = int(
+            os.environ.get("HIVECLAW_MAX_QUEUE_DEPTH", "50")
+        )
+        mq, th, st = start_swarm_batch_worker(
+            ctx,
+            max_batch=int(os.environ.get("HIVECLAW_MAX_BATCH", "8")),
+            max_client_queue_depth=ctx.max_client_queue_depth,
+        )
+        ctx.master_queue = mq
+        ctx.batch_worker_thread = th
+        ctx.batch_worker_stop = st
+        print(
+            "[hiveclaw_server] Phase 7 continuous batching enabled "
+            f"(max_queue_depth={ctx.max_client_queue_depth})",
+            flush=True,
+        )
     yield
+    if continuous and ctx.batch_worker_stop is not None:
+        ctx.batch_worker_stop.set()
+        if ctx.batch_worker_thread is not None:
+            ctx.batch_worker_thread.join(timeout=5.0)
     app.state.executor.shutdown(wait=True)
 
 
@@ -446,12 +478,94 @@ async def v1_slots(request: Request) -> dict[str, Any]:
     return {"slots": slots, "count": len(slots)}
 
 
+async def _chat_completions_batched_stream(
+    request: Request, body: ChatCompletionRequest
+) -> EventSourceResponse:
+    """Phase 7: enqueue to ``swarm_batch_worker``; stream from per-client asyncio.Queue."""
+    from generate_batch import BatchedStreamJob
+
+    ctx: ServerContext = request.app.state.ctx
+    if ctx.master_queue is None:
+        raise HTTPException(
+            status_code=503, detail="continuous batch worker not initialized"
+        )
+
+    msgs = _messages_as_dicts(body.messages)
+    if not msgs:
+        raise HTTPException(status_code=400, detail="messages must be non-empty")
+
+    loop = asyncio.get_running_loop()
+    max_q = int(ctx.max_client_queue_depth)
+    client_q: asyncio.Queue = asyncio.Queue(maxsize=max_q)
+    cancelled = threading.Event()
+
+    job = BatchedStreamJob(
+        body=body,
+        messages=msgs,
+        client_queue=client_q,
+        loop=loop,
+        cancelled=cancelled,
+    )
+
+    await loop.run_in_executor(None, ctx.master_queue.put, job)
+
+    model_name = body.model or DEFAULT_MODEL_NAME
+    created = int(time.time())
+    cid0 = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+
+    async def event_gen() -> AsyncIterator[dict[str, str]]:
+        yield {
+            "data": json.dumps(
+                {
+                    "id": cid0,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": ""},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
+        }
+        while True:
+            if await request.is_disconnected():
+                cancelled.set()
+            try:
+                kind, payload = await asyncio.wait_for(client_q.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            if kind == "done":
+                yield {"data": "[DONE]"}
+                break
+            if kind == "chunk":
+                if "error" in payload:
+                    yield {"data": json.dumps(payload)}
+                    break
+                yield {"data": json.dumps(payload)}
+                continue
+            break
+
+    return EventSourceResponse(event_gen())
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request, body: ChatCompletionRequest):
     ctx: ServerContext = request.app.state.ctx
     sem: asyncio.Semaphore = request.app.state.sem
     executor: concurrent.futures.ThreadPoolExecutor = request.app.state.executor
     loop = asyncio.get_running_loop()
+
+    if getattr(request.app.state, "continuous_batch", False):
+        if not body.stream:
+            raise HTTPException(
+                status_code=400,
+                detail="HIVECLAW_CONTINUOUS_BATCH=1 requires stream=true",
+            )
+        return await _chat_completions_batched_stream(request, body)
 
     if body.stream:
 

@@ -71,6 +71,8 @@ python-clean:
 
 # PyO3/maturin: pin interpreter; force CARGO_TARGET_DIR to this repo's target/ so ~/.cargo/config.toml build.target-dir cannot pull another checkout's PyO3 cache.
 # When PYTHON is under a venv, export VIRTUAL_ENV so maturin uses that env (not a different .venv in the repo).
+# `make python` compiles/installs extensions only — it does not run MLX integration tests. Avoid running
+# MLX slab/LLM scripts (integration_test, test_batched_steering, spikes) while the harvester holds the GPU.
 python: spike-deps python-check-maturin
 	@PATH="$(_PY_BINDIR):$$PATH" command -v cmake >/dev/null 2>&1 || (echo >&2 "cmake not found (required for crates/hiveclaw-mlx). pip should install it: check scripts/requirements-spike.txt"; exit 1)
 	cd crates/hiveclaw-mlx && PATH="$(_PY_BINDIR):$$PATH" CMAKE_ARGS="-DPython_EXECUTABLE=$(MATURIN_PYTHON)" "$(MATURIN_PYTHON)" setup.py build_ext --inplace

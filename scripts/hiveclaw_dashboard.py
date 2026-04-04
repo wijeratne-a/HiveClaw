@@ -50,8 +50,12 @@ def _parse_telemetry_log(path: Path) -> tuple[int, int]:
         ev = obj.get("event")
         if ev == "poison_clamp":
             poison += 1
+        elif ev == "poison_clamp_batch":
+            poison += len(obj.get("slots", []) or [])
         elif ev == "torn_epoch_skip":
             torn += 1
+        elif ev == "torn_epoch_skip_batch":
+            torn += len(obj.get("slots", []) or [])
     return torn, poison
 
 

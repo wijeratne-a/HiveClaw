@@ -2,6 +2,7 @@ import math
 import os
 
 import mlx.core as mx
+import numpy as np
 
 from ._core import SlabClient as _SlabClientBase
 
@@ -57,6 +58,33 @@ def _shape_list(shape: list) -> list[int]:
     return [int(d) for d in shape]
 
 
+def _validate_batch_slots_arr(slots: mx.array) -> int:
+    """int32 [B], unique indices in [0, N_SLOTS). Returns B."""
+    if slots.dtype != mx.int32:
+        raise ValueError(f"batch slots must be int32, got {slots.dtype}")
+    if len(slots.shape) != 1:
+        raise ValueError(f"batch slots must be 1-D [B], got shape {slots.shape}")
+    mx.eval(slots)
+    flat = np.array(slots, dtype=np.int32).reshape(-1)
+    if flat.size == 0:
+        raise ValueError("batch slots must be non-empty")
+    if np.unique(flat).size != flat.size:
+        raise ValueError("batch slots must not contain duplicate indices")
+    for x in flat.tolist():
+        if int(x) < 0 or int(x) >= _N_SLOTS:
+            raise ValueError(f"slot index out of range: {x}")
+    return int(flat.size)
+
+
+def _validate_batch_latents(latents: mx.array, B: int) -> None:
+    d = int(_mlx.get_latent_dim())
+    sh = tuple(int(x) for x in latents.shape)
+    if sh != (B, 1, d) or latents.dtype != mx.bfloat16:
+        raise ValueError(
+            f"latents must be [{B},1,{d}] bfloat16, got {sh} {latents.dtype}"
+        )
+
+
 class SlabClient(_SlabClientBase):
     def __init__(self):
         super().__init__()
@@ -94,6 +122,28 @@ class SlabClient(_SlabClientBase):
         if depends is None:
             return self._slab_handle.write_slot_v5(int(slot_index), latent_c)
         return self._slab_handle.write_slot_v5(int(slot_index), latent_c, depends)
+
+    def read_slots(
+        self, slots: mx.array, *, depends=None
+    ) -> tuple[mx.array, mx.array]:
+        """Read B slots: returns ([B,1,256] bf16, [B] uint8 status: 0=ok, 1=torn)."""
+        _ = _validate_batch_slots_arr(slots)
+        slots_c = mx.contiguous(slots)
+        if depends is None:
+            return self._slab_handle.read_slots_v5(slots_c)
+        return self._slab_handle.read_slots_v5(slots_c, depends)
+
+    def write_slots(
+        self, slots: mx.array, latents: mx.array, *, depends=None
+    ) -> tuple[mx.array, mx.array]:
+        """Write B slots: latents [B,1,256] bf16; returns (latents, [B] uint8 status)."""
+        B = _validate_batch_slots_arr(slots)
+        _validate_batch_latents(latents, B)
+        slots_c = mx.contiguous(slots)
+        latents_c = mx.contiguous(latents)
+        if depends is None:
+            return self._slab_handle.write_slots_v5(slots_c, latents_c)
+        return self._slab_handle.write_slots_v5(slots_c, latents_c, depends)
 
     def write_scent(
         self, slot_index: int, scent: mx.array, *, depends=None
@@ -136,6 +186,20 @@ class SlabClient(_SlabClientBase):
         if depends is None:
             return self._slab_handle.read(byte_offset, st)
         return self._slab_handle.read(byte_offset, st, depends)
+
+    def read_u32_at(self, byte_offset: int) -> int:
+        """Little-endian u32 at byte offset (v5 layout headers; tests / tooling)."""
+        bo = int(byte_offset)
+        if bo < 0 or bo + 4 > _SLAB_SIZE:
+            raise ValueError(f"read_u32_at out of slab range: {bo}")
+        return int(super().read_u32_at(bo))
+
+    def write_u32_at(self, byte_offset: int, value: int) -> None:
+        """Little-endian u32 write (e.g. perturb epoch for torn-read tests)."""
+        bo = int(byte_offset)
+        if bo < 0 or bo + 4 > _SLAB_SIZE:
+            raise ValueError(f"write_u32_at out of slab range: {bo}")
+        super().write_u32_at(bo, int(value) & 0xFFFFFFFF)
 
     def get_slot_states(self) -> list:
         """Best-effort snapshot for all slots (4096 for v5)."""

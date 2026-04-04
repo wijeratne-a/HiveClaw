@@ -7,12 +7,14 @@ Clamp: L2 ball radius 2.0 on alpha * scent_2048; poison_clamp telemetry on stder
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
 
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 
 
 def check_latent_dim(slab_client) -> None:
@@ -96,6 +98,116 @@ def steer_hidden(
     return (h_step.astype(mx.float32) + safe).astype(h_step.dtype)
 
 
+def steer_hidden_batched(
+    h_batch: mx.array,
+    slab_client,
+    batch_slots: mx.array,
+    W_enc: mx.array,
+    b_dec: mx.array,
+    alpha: float,
+) -> mx.array:
+    """Batched read_slots → decode → L2 clamp per row → add to last-token hidden [B,1,2048]."""
+    scents, _st = slab_client.read_slots(batch_slots, depends=h_batch)
+    scent_f = scents.astype(mx.float32)
+    scent_2048 = mx.matmul(scent_f, W_enc) + b_dec
+    scaled = float(alpha) * scent_2048
+    norm = mx.linalg.norm(scaled, ord=2, axis=-1, keepdims=True)
+    scale = mx.where(norm > 2.0, 2.0 / (norm + 1e-7), mx.ones_like(norm))
+    safe = scaled * scale
+    mx.eval(norm)
+    if bool(mx.any(norm > 2.0).item()):
+        mx.eval(batch_slots)
+        B = int(batch_slots.shape[0])
+        slots_np = np.array(batch_slots, dtype=np.int32).reshape(-1)
+        norm_flat = np.array(norm, dtype=np.float64).reshape(-1)
+        clamped = [int(slots_np[i]) for i in range(B) if norm_flat[i] > 2.0]
+        if clamped:
+            sys.stderr.write(
+                json.dumps(
+                    {
+                        "event": "poison_clamp_batch",
+                        "slots": clamped,
+                        "ts_ns": time.time_ns(),
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            sys.stderr.flush()
+    return (h_batch.astype(mx.float32) + safe).astype(h_batch.dtype)
+
+
+def apply_steering_sandwich(
+    h_step_bucket: mx.array,
+    B_active: int,
+    slab_client,
+    batch_slots: mx.array,
+    W_enc: mx.array,
+    b_dec: mx.array,
+    alpha: float,
+    *,
+    b_enc: mx.array | None = None,
+    d_latent: int = 256,
+) -> mx.array:
+    """Slice [B_bucket,1,2048] → steer B_active rows (read, torn→0, clamp) → optional write_slots → pad.
+
+    When ``b_enc`` is None, skips slab write-back (tests / partial integration).
+    """
+    B_bucket = int(h_step_bucket.shape[0])
+    if B_active > B_bucket:
+        raise ValueError(f"B_active={B_active} > B_bucket={B_bucket}")
+    if B_active < 1:
+        raise ValueError("B_active must be >= 1")
+    H_active = h_step_bucket[:B_active]
+    scents, st = slab_client.read_slots(batch_slots, depends=H_active)
+    mx.eval(scents, st)
+    st_exp = st.reshape(-1, 1, 1)
+    scents = mx.where(st_exp == 0, scents, mx.zeros_like(scents))
+
+    scent_f = scents.astype(mx.float32)
+    scent_2048 = mx.matmul(scent_f, W_enc) + b_dec
+    scaled = float(alpha) * scent_2048
+    norm = mx.linalg.norm(scaled, ord=2, axis=-1, keepdims=True)
+    scale = mx.where(norm > 2.0, 2.0 / (norm + 1e-7), mx.ones_like(norm))
+    safe = scaled * scale
+    mx.eval(norm)
+    if bool(mx.any(norm > 2.0).item()):
+        mx.eval(batch_slots)
+        B = int(batch_slots.shape[0])
+        slots_np = np.array(batch_slots, dtype=np.int32).reshape(-1)
+        norm_flat = np.array(norm, dtype=np.float64).reshape(-1)
+        clamped = [int(slots_np[i]) for i in range(B) if norm_flat[i] > 2.0]
+        if clamped:
+            sys.stderr.write(
+                json.dumps(
+                    {
+                        "event": "poison_clamp_batch",
+                        "slots": clamped,
+                        "ts_ns": time.time_ns(),
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            sys.stderr.flush()
+
+    H_steered = (H_active.astype(mx.float32) + safe).astype(H_active.dtype)
+
+    if b_enc is not None:
+        h_f = H_steered.astype(mx.float32)
+        latent = mx.maximum(
+            mx.matmul(h_f, mx.transpose(W_enc)) + b_enc, 0.0
+        ).astype(mx.bfloat16)
+        latent = latent.reshape(B_active, 1, d_latent)
+        _, wst = slab_client.write_slots(batch_slots, latent, depends=H_steered)
+        mx.eval(wst)
+
+    if B_bucket > B_active:
+        pad = mx.zeros_like(h_step_bucket[B_active:])
+        return mx.concatenate([H_steered, pad], axis=0)
+    return H_steered
+
+
 class ActiveSteeringWrapper(nn.Module):
     """Final layer + read_slot_v5 → decode → clamp → inject into last token hidden."""
 
@@ -153,4 +265,73 @@ class ActiveSteeringWrapper(nn.Module):
         else:
             h_final = h_modified
 
+        return (h_final,) + out[1:] if isinstance(out, tuple) else h_final
+
+
+class BatchedSteeringWrapper(nn.Module):
+    """Final layer + Steering Sandwich: slice B_active → read/steer/write → pad to B_bucket."""
+
+    def __init__(
+        self,
+        layer,
+        slab_client,
+        W_enc: mx.array,
+        b_dec: mx.array,
+        alpha: float,
+        batch_slots: mx.array,
+        *,
+        b_enc: mx.array | None = None,
+        d_latent: int = 256,
+    ):
+        super().__init__()
+        object.__setattr__(self, "layer", layer)
+        object.__setattr__(self, "slab_client", slab_client)
+        object.__setattr__(self, "W_enc", W_enc)
+        object.__setattr__(self, "b_dec", b_dec)
+        object.__setattr__(self, "b_enc", b_enc)
+        object.__setattr__(self, "d_latent", int(d_latent))
+        object.__setattr__(self, "alpha", float(alpha))
+        object.__setattr__(self, "current_batch_slots", batch_slots)
+        object.__setattr__(self, "last_steered_h", None)
+
+    def __getattr__(self, name: str):
+        if name in (
+            "layer",
+            "slab_client",
+            "W_enc",
+            "b_dec",
+            "b_enc",
+            "d_latent",
+            "alpha",
+            "current_batch_slots",
+            "last_steered_h",
+        ):
+            return super().__getattr__(name)
+        try:
+            return getattr(self.layer, name)
+        except AttributeError:
+            return super().__getattr__(name)
+
+    def __call__(self, *args, **kwargs):
+        out = self.layer(*args, **kwargs)
+        h = out[0] if isinstance(out, tuple) else out
+        h_step = h[:, -1:, :]
+        B_active = int(self.current_batch_slots.shape[0])
+        h_modified = apply_steering_sandwich(
+            h_step,
+            B_active,
+            self.slab_client,
+            self.current_batch_slots,
+            self.W_enc,
+            self.b_dec,
+            self.alpha,
+            b_enc=self.b_enc,
+            d_latent=int(self.d_latent),
+        )
+        # last_steered_h is only the active rows (for encode parity with callers)
+        object.__setattr__(self, "last_steered_h", h_modified[:B_active])
+        if h.shape[1] > 1:
+            h_final = mx.concatenate([h[:, :-1, :], h_modified], axis=1)
+        else:
+            h_final = h_modified
         return (h_final,) + out[1:] if isinstance(out, tuple) else h_final

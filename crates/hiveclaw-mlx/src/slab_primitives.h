@@ -49,6 +49,17 @@ class SlabHandle {
                                    mlx::core::array latent,
                                    std::optional<mlx::core::array> dep);
 
+    /// Batched v5 read: returns ([B,1,256] bf16, [B] uint8 status). Row i matches slot_indices[i].
+    std::pair<mlx::core::array, mlx::core::array> read_slots_v5(
+        std::vector<uint32_t> slot_indices,
+        std::optional<mlx::core::array> dep);
+
+    /// Batched v5 write: latents [B,1,256] bf16. Returns (latents passthrough, [B] uint8 status).
+    std::pair<mlx::core::array, mlx::core::array> write_slots_v5(
+        std::vector<uint32_t> slot_indices,
+        mlx::core::array latents,
+        std::optional<mlx::core::array> dep);
+
     mlx::core::array claim(mlx::core::array candidate_indices,
                            uint32_t agent_id,
                            std::optional<mlx::core::array> dep);
@@ -139,4 +150,113 @@ class ReadSlab : public mlx::core::Primitive {
     std::optional<uint32_t> v5_slot_for_epoch_;
     /// 1-byte shared; v5 GPU path only; completion handler may emit telemetry.
     MTL::Buffer* status_buf_{nullptr};
+};
+
+/// Shared B-byte status buffer (Metal shared memory) filled by batched read/write GPU/CPU paths.
+class BatchStatusBuffer {
+   public:
+    BatchStatusBuffer(MTL::Device* dev, uint32_t b);
+    ~BatchStatusBuffer();
+    BatchStatusBuffer(const BatchStatusBuffer&) = delete;
+    BatchStatusBuffer& operator=(const BatchStatusBuffer&) = delete;
+    MTL::Buffer* buf() const { return buf_; }
+    uint32_t batch_size() const { return B_; }
+
+   private:
+    MTL::Buffer* buf_{nullptr};
+    uint32_t B_{0};
+};
+
+/// Batched v5 slab read → [B,1,256] bf16; writes per-row status bytes into BatchStatusBuffer.
+class ReadSlabBatchedOp : public mlx::core::Primitive {
+   public:
+    ReadSlabBatchedOp(MTL::Buffer* slab,
+                      std::vector<uint32_t> slot_indices,
+                      std::shared_ptr<BatchStatusBuffer> status_ctx,
+                      mlx::core::Stream s);
+    ~ReadSlabBatchedOp() override;
+    void eval_cpu(const std::vector<mlx::core::array>& inputs,
+                  std::vector<mlx::core::array>& outputs) override;
+    void eval_gpu(const std::vector<mlx::core::array>& inputs,
+                  std::vector<mlx::core::array>& outputs) override;
+    std::vector<mlx::core::array> jvp(
+        const std::vector<mlx::core::array>& primals,
+        const std::vector<mlx::core::array>& tangents,
+        const std::vector<int>& argnums) override;
+    std::vector<mlx::core::array> vjp(
+        const std::vector<mlx::core::array>& primals,
+        const std::vector<mlx::core::array>& cotangents,
+        const std::vector<int>& argnums,
+        const std::vector<mlx::core::array>& outputs) override;
+    std::pair<std::vector<mlx::core::array>, std::vector<int>> vmap(
+        const std::vector<mlx::core::array>& inputs,
+        const std::vector<int>& axes) override;
+    std::vector<mlx::core::Shape> output_shapes(
+        const std::vector<mlx::core::array>& inputs) override;
+    const char* name() const override { return "ReadSlabBatchedOp"; }
+
+   private:
+    MTL::Buffer* slab_buf_;
+    std::vector<uint32_t> slot_indices_;
+    std::shared_ptr<BatchStatusBuffer> status_ctx_;
+};
+
+/// Copies BatchStatusBuffer → mlx uint8 [B]; input array is graph dependency only.
+class CopyBatchStatusOp : public mlx::core::UnaryPrimitive {
+   public:
+    CopyBatchStatusOp(std::shared_ptr<BatchStatusBuffer> status_ctx, mlx::core::Stream s);
+    void eval_cpu(const std::vector<mlx::core::array>& inputs, mlx::core::array& out) override;
+    void eval_gpu(const std::vector<mlx::core::array>& inputs, mlx::core::array& out) override;
+    std::vector<mlx::core::array> jvp(
+        const std::vector<mlx::core::array>& primals,
+        const std::vector<mlx::core::array>& tangents,
+        const std::vector<int>& argnums) override;
+    std::vector<mlx::core::array> vjp(
+        const std::vector<mlx::core::array>& primals,
+        const std::vector<mlx::core::array>& cotangents,
+        const std::vector<int>& argnums,
+        const std::vector<mlx::core::array>& outputs) override;
+    std::pair<std::vector<mlx::core::array>, std::vector<int>> vmap(
+        const std::vector<mlx::core::array>& inputs,
+        const std::vector<int>& axes) override;
+    std::vector<mlx::core::Shape> output_shapes(
+        const std::vector<mlx::core::array>& inputs) override;
+    const char* name() const override { return "CopyBatchStatusOp"; }
+
+   private:
+    std::shared_ptr<BatchStatusBuffer> status_ctx_;
+};
+
+/// Batched v5 stamped writes; status per row in BatchStatusBuffer.
+class WriteSlabBatchedOp : public mlx::core::Primitive {
+   public:
+    WriteSlabBatchedOp(MTL::Buffer* slab,
+                       std::vector<uint32_t> slot_indices,
+                       std::shared_ptr<BatchStatusBuffer> status_ctx,
+                       mlx::core::Stream s);
+    ~WriteSlabBatchedOp() override;
+    void eval_cpu(const std::vector<mlx::core::array>& inputs,
+                  std::vector<mlx::core::array>& outputs) override;
+    void eval_gpu(const std::vector<mlx::core::array>& inputs,
+                  std::vector<mlx::core::array>& outputs) override;
+    std::vector<mlx::core::array> jvp(
+        const std::vector<mlx::core::array>& primals,
+        const std::vector<mlx::core::array>& tangents,
+        const std::vector<int>& argnums) override;
+    std::vector<mlx::core::array> vjp(
+        const std::vector<mlx::core::array>& primals,
+        const std::vector<mlx::core::array>& cotangents,
+        const std::vector<int>& argnums,
+        const std::vector<mlx::core::array>& outputs) override;
+    std::pair<std::vector<mlx::core::array>, std::vector<int>> vmap(
+        const std::vector<mlx::core::array>& inputs,
+        const std::vector<int>& axes) override;
+    std::vector<mlx::core::Shape> output_shapes(
+        const std::vector<mlx::core::array>& inputs) override;
+    const char* name() const override { return "WriteSlabBatchedOp"; }
+
+   private:
+    MTL::Buffer* slab_buf_;
+    std::vector<uint32_t> slot_indices_;
+    std::shared_ptr<BatchStatusBuffer> status_ctx_;
 };

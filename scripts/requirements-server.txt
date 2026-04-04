@@ -1,5 +1,8 @@
 # Phase 5: FastAPI server + TUI dashboard (install alongside scripts/requirements-spike.txt)
+# Phase 7: pin mlx-lm with spike; bumping major/minor mlx-lm requires re-auditing
+# docs/adr/BATCHED_STEERING_CONTRACT.md (Per-step invariant, KVCache slicing).
 fastapi>=0.111
 uvicorn[standard]>=0.29
 sse-starlette>=1.8
 rich>=13.0
+mlx-lm==0.31.1

@@ -273,6 +273,17 @@ impl SlabClient {
         Ok(v)
     }
 
+    /// Write a little-endian `u32` (e.g. to perturb `front_epoch` in slab tests).
+    pub fn write_u32_at(&mut self, byte_offset: usize, value: u32) -> PyResult<()> {
+        bounds_end(byte_offset, 4)?;
+        let base = self.buf.base_ptr();
+        unsafe {
+            ptr::write_unaligned(base.add(byte_offset) as *mut u32, value.to_le());
+        }
+        fence(Ordering::SeqCst);
+        Ok(())
+    }
+
     /// Read a little-endian `u64` from the mapped slab (global header magic).
     pub fn read_u64_at(&self, byte_offset: usize) -> PyResult<u64> {
         bounds_end(byte_offset, 8)?;

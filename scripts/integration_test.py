@@ -12,6 +12,7 @@ Usage:
   python scripts/integration_test.py --quick   # XPC + import only
   python scripts/integration_test.py --stress  # + claim/release loop + swarm_spike child
   python scripts/integration_test.py --stress --stress-max-slots 4096  # full slab gauntlet
+  python scripts/integration_test.py --batched   # read_slots / write_slots v5 (daemon required)
 """
 
 from __future__ import annotations
@@ -43,6 +44,37 @@ def _stress_claim_release(n_slots: int) -> None:
     print(f"[integration_test] stress ok: {n_slots} claim/release cycles", flush=True)
 
 
+def _batched_slab_roundtrip() -> None:
+    import mlx.core as mx
+    import numpy as np
+
+    import hiveclaw_python as h
+
+    c = h.SlabClient()
+    slots = [200, 201, 202, 203]
+    for s in slots:
+        cand = mx.array([s], dtype=mx.int32)
+        r = c.claim_task(cand)
+        mx.eval(r)
+        got = int(mx.array(r).item())
+        assert got == s, (got, s)
+    B = len(slots)
+    si = mx.array(slots, dtype=mx.int32)
+    data, st = c.read_slots(si)
+    mx.eval(data, st)
+    assert list(data.shape) == [B, 1, 256], data.shape
+    assert list(st.shape) == [B], st.shape
+    latent = mx.ones((B, 1, 256), dtype=mx.bfloat16)
+    out, wst = c.write_slots(si, latent)
+    mx.eval(out, wst)
+    assert list(wst.shape) == [B]
+    wnp = np.array(wst, dtype=np.uint8).reshape(-1)
+    assert np.all(wnp == 0), wnp.tolist()
+    for s in slots:
+        c.release_task(s)
+    print("[integration_test] batched read/write ok", flush=True)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="HiveClaw v5 integration harness")
     p.add_argument(
@@ -61,6 +93,11 @@ def main() -> int:
         default=256,
         metavar="N",
         help="Sequential slots for --stress (default 256; use 4096 for full slab)",
+    )
+    p.add_argument(
+        "--batched",
+        action="store_true",
+        help="Claim 4 slots, read_slots + write_slots, assert shapes and status",
     )
     args = p.parse_args()
 
@@ -97,6 +134,15 @@ def main() -> int:
 
     if args.quick:
         return 0
+
+    if args.batched:
+        try:
+            _batched_slab_roundtrip()
+        except Exception as e:
+            print(f"batched slab test failed: {e}", file=sys.stderr)
+            return 1
+        if not args.stress:
+            return 0
 
     if args.stress:
         n = int(args.stress_max_slots)
