@@ -34,6 +34,9 @@ using mlx::core::zeros_like;
 
 namespace {
 
+// Python batched slots: int32 -1 → bit pattern 0xFFFFFFFF (dummy row; no IOSurface access).
+static constexpr uint32_t HIVECLAW_SENTINEL_SLOT = 0xFFFFFFFFu;
+
 static const char* COPY_BF16_MSL = R"(
 #include <metal_stdlib>
 using namespace metal;
@@ -104,6 +107,8 @@ kernel void read_slab_v5(
 )";
 
 // Batched v5 read: Z = batch index; 32 threads × 8 uint16 per row; per-row torn → status_out[b]=1.
+// If a future Metal dispatch uses this kernel, handle HIVECLAW_SENTINEL_SLOT (0xFFFFFFFF) with
+// masked no-ops (not per-thread early return) so threadgroup barriers remain well-formed.
 static const char* READ_V5_BATCHED_MSL = R"(
 #include <metal_stdlib>
 using namespace metal;
@@ -165,6 +170,7 @@ kernel void read_slab_v5_batched(
 )";
 
 // Batched v5 write: Z = batch row; claim check; epoch-stamped payload (Metal path TBD — eval_gpu uses CPU).
+// If activated on GPU, add sentinel-row masking for 0xFFFFFFFF (same barrier constraints as READ_V5_BATCHED_MSL).
 static const char* WRITE_V5_BATCHED_MSL = R"(
 #include <metal_stdlib>
 using namespace metal;
@@ -259,7 +265,7 @@ static void emit_torn_batch_telemetry(
     std::vector<uint32_t> torn;
     torn.reserve(B);
     for (uint32_t i = 0; i < B; ++i) {
-        if (status[i] == 1) {
+        if (status[i] == 1 && slot_indices[i] != HIVECLAW_SENTINEL_SLOT) {
             torn.push_back(slot_indices[i]);
         }
     }
@@ -287,11 +293,14 @@ static std::vector<uint32_t> validate_slot_indices_batched(const std::vector<uin
     }
     std::set<uint32_t> seen;
     for (uint32_t x : v) {
+        if (x == HIVECLAW_SENTINEL_SLOT) {
+            continue;
+        }
         if (x >= HCLW_N_SLOTS) {
             throw std::invalid_argument("batched slab: slot_index out of range");
         }
         if (!seen.insert(x).second) {
-            throw std::invalid_argument("batched slab: duplicate slot_index");
+            throw std::invalid_argument("batched slab: duplicate real slot_index");
         }
     }
     return v;
@@ -839,9 +848,14 @@ void ReadSlabBatchedOp::eval_cpu(
 
     for (uint32_t b = 0; b < B; ++b) {
         uint32_t si = slot_indices_[b];
+        uint16_t* row = h_dst + b * HCLW_SCENT_ELEMS;
+        if (si == HIVECLAW_SENTINEL_SLOT) {
+            std::memset(row, 0, HCLW_SCENT_BYTES);
+            st[b] = 0;
+            continue;
+        }
         size_t sb = slot_base(si);
         char* hdr = slab_base + sb;
-        uint16_t* row = h_dst + b * HCLW_SCENT_ELEMS;
 
         auto load_u32 = [hdr](size_t off) -> uint32_t {
             return reinterpret_cast<std::atomic<uint32_t>*>(hdr + off)->load(
@@ -1000,6 +1014,10 @@ void WriteSlabBatchedOp::eval_cpu(
 
     for (uint32_t b = 0; b < B; ++b) {
         uint32_t si = slot_indices_[b];
+        if (si == HIVECLAW_SENTINEL_SLOT) {
+            st[b] = 0;
+            continue;
+        }
         size_t sb = slot_base(si);
         char* sh = slab_base + sb;
         auto* claim = reinterpret_cast<std::atomic<uint32_t>*>(sh + OFF_S_CLAIM_FLAG);

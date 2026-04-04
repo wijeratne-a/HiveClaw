@@ -37,6 +37,40 @@ except ImportError as e:  # pragma: no cover
     ) from e
 
 
+def probe_max_batch(model_id: str, env_max: int, probe_ctx_len: int) -> int:
+    """Exponential batch-size probe using a temporary model; returns last successful B (≥1)."""
+    from mlx_lm import load as mlx_load
+    from mlx_lm.models.cache import make_prompt_cache
+
+    last_ok = 0
+    tmp_model = None
+    try:
+        tmp_model, _ = mlx_load(model_id)
+        B = 1
+        while B <= env_max:
+            try:
+                cache = make_prompt_cache(tmp_model)
+                dummy_prefill = mx.zeros((B, probe_ctx_len), dtype=mx.int32)
+                logits = tmp_model(dummy_prefill, cache=cache)
+                mx.eval(logits)
+                dummy_decode = mx.zeros((B, 1), dtype=mx.int32)
+                logits = tmp_model(dummy_decode, cache=cache)
+                mx.eval(logits)
+                del cache, logits
+                last_ok = B
+                B *= 2
+            except RuntimeError:
+                break
+    finally:
+        if tmp_model is not None:
+            del tmp_model
+        if hasattr(mx, "clear_cache"):
+            mx.clear_cache()
+        else:
+            mx.metal.clear_cache()
+    return last_ok if last_ok > 0 else 1
+
+
 def next_pow2_bucket(n: int, cap: int = 32) -> int:
     """Smallest power of two >= n, capped at ``cap``."""
     if n <= 0:
@@ -126,24 +160,43 @@ def _kv_compile_output_arrays(kv_cache: list[Any]) -> list[mx.array]:
     return out
 
 
-def _try_compile_decode_step(
-    model: Any, kv_cache: list[Any]
+def _build_bucket_slots(entries: list[ChatBatchEntry], B_bucket: int) -> mx.array:
+    """``[B_bucket]`` int32: real slot ids then ``-1`` sentinel dummies."""
+    slots = [e.slot_id for e in entries] + [-1] * (B_bucket - len(entries))
+    return mx.array(slots, dtype=mx.int32)
+
+
+def _pad_token_row_to_bucket(
+    t: mx.array, B_active: int, B_bucket: int, pad_id: int
+) -> mx.array:
+    """``t`` is ``[B_active]`` last-token ids; return ``[B_bucket]`` with ``pad_id`` tail."""
+    if B_active >= B_bucket:
+        return t
+    tail = mx.full((B_bucket - B_active,), pad_id, dtype=t.dtype)
+    return mx.concatenate([t, tail], axis=0)
+
+
+def _try_compile_inner_step(
+    model: Any,
+    kv_cache: list[Any],
+    steering_wrapper: Any,
 ) -> Callable[[mx.array], mx.array] | None:
-    """Return compiled single-token decode fn, or ``None`` if disabled / unsupported."""
+    """Compile ``model.model`` only (transformer inner); LM head stays eager."""
     if os.environ.get("HIVECLAW_COMPILE_DECODE", "0") != "1":
         return None
     outputs = _kv_compile_output_arrays(kv_cache)
     if len(outputs) < 2:
         return None
+    outputs.append(steering_wrapper.last_steered_norm)
 
-    def decode_step(ny: mx.array) -> mx.array:
-        return model(ny, cache=kv_cache)
+    def inner_step(ny: mx.array) -> mx.array:
+        return model.model(ny, cache=kv_cache)
 
     try:
-        return mx.compile(decode_step, outputs=outputs, shapeless=True)
+        return mx.compile(inner_step, outputs=outputs, shapeless=True)
     except Exception:
         try:
-            return mx.compile(decode_step, outputs=outputs, shapeless=False)
+            return mx.compile(inner_step, outputs=outputs, shapeless=False)
         except Exception:
             return None
 
@@ -261,15 +314,6 @@ def push_done(loop: asyncio.AbstractEventLoop, q: asyncio.Queue) -> None:
     fut.result(timeout=120)
 
 
-def _apply_dummy_token_mask(
-    t: mx.array, B_active: int, B_bucket: int, pad_id: int
-) -> mx.array:
-    if B_active >= B_bucket:
-        return t
-    mask = mx.arange(B_bucket) < B_active
-    return mx.where(mask, t, mx.full((B_bucket,), pad_id, dtype=t.dtype))
-
-
 def _evict_indices(
     entries: list[ChatBatchEntry],
     kv_cache: list[Any],
@@ -373,20 +417,8 @@ def generate_batch_session(
     x = build_left_padded_batch(prompts, pad_id, B_bucket)
     cache = make_prompt_cache(model)
     lp, act = rebuild_hive_kv_metadata(entries, B_bucket)
-    if not install_hiveclaw_kv_cache(model, cache, lp, act):
-        sys.stderr.write(
-            json.dumps(
-                {
-                    "event": "hiveclaw_kv_mask_skip",
-                    "reason": "sliding_window_attention",
-                    "ts_ns": time.time_ns(),
-                },
-                separators=(",", ":"),
-            )
-            + "\n"
-        )
-        sys.stderr.flush()
-    batch_slots = mx.array([e.slot_id for e in entries], dtype=mx.int32)
+    install_hiveclaw_kv_cache(model, cache, lp, act)
+    batch_slots = _build_bucket_slots(entries, B_bucket)
     alpha = float(entries[0].alpha)
 
     steering = BatchedSteeringWrapper(
@@ -402,22 +434,23 @@ def generate_batch_session(
     model.model.layers[-1] = steering
 
     eos_pending: set[int] = set()
-    compiled_decode: Callable[[mx.array], mx.array] | None = None
+    compiled_inner: Callable[[mx.array], mx.array] | None = None
 
     try:
         logits = model(x, cache=cache)
         _eval_cache_states(cache)
         mx.eval(logits)
-        compiled_decode = _try_compile_decode_step(model, cache)
+        compiled_inner = _try_compile_inner_step(model, cache, steering)
 
-        t = mx.argmax(logits[:, -1, :], axis=-1)
-        t = _apply_dummy_token_mask(t, B_active0, B_bucket, pad_id)
+        logits_active = logits[:B_active0]
+        t = mx.argmax(logits_active[:, -1, :], axis=-1)
         mx.eval(t)
         full_t = np.asarray(t).reshape(-1)
         tok_line = full_t[:B_active0].copy()
 
         to_drop0 = {i for i in range(len(entries)) if entries[i].cancelled.is_set()}
-        next_y = mx.reshape(t, (B_bucket, 1))
+        t_b0 = _pad_token_row_to_bucket(t, B_active0, B_bucket, pad_id)
+        next_y = mx.reshape(t_b0, (B_bucket, 1))
         if to_drop0:
             next_y, emptied = _evict_indices(
                 entries, cache, slab_client, B_bucket, pad_id, next_y, to_drop0
@@ -428,17 +461,16 @@ def generate_batch_session(
             tok_line = tok_line[m_keep0]
             lp0, act0 = rebuild_hive_kv_metadata(entries, B_bucket)
             sync_hive_metadata_to_fa_cache(cache, model, lp0, act0)
-            compiled_decode = _try_compile_decode_step(model, cache)
+            compiled_inner = _try_compile_inner_step(model, cache, steering)
 
         B_active = len(entries)
         if B_active == 0:
             return
-        batch_slots = mx.array([e.slot_id for e in entries], dtype=mx.int32)
+        batch_slots = _build_bucket_slots(entries, B_bucket)
         object.__setattr__(steering, "current_batch_slots", batch_slots)
         _emit_row_tokens(
             tokenizer, entries, tok_line, max_client_queue_depth, eos_pending
         )
-        next_y = mx.reshape(t, (B_bucket, 1))
 
         step = 0
         while step < 8192:
@@ -461,22 +493,49 @@ def generate_batch_session(
                     break
                 lp1, act1 = rebuild_hive_kv_metadata(entries, B_bucket)
                 sync_hive_metadata_to_fa_cache(cache, model, lp1, act1)
-                compiled_decode = _try_compile_decode_step(model, cache)
+                compiled_inner = _try_compile_inner_step(model, cache, steering)
 
             B_active = len(entries)
             if B_active == 0:
                 break
 
-            batch_slots = mx.array([e.slot_id for e in entries], dtype=mx.int32)
+            batch_slots = _build_bucket_slots(entries, B_bucket)
             object.__setattr__(steering, "current_batch_slots", batch_slots)
 
-            if compiled_decode is not None:
+            if compiled_inner is not None:
                 try:
-                    logits = compiled_decode(next_y)
-                    _eval_cache_states(cache)
+                    hidden = compiled_inner(next_y)
+                    mx.eval(hidden)
+                    tie = getattr(getattr(model, "args", None), "tie_word_embeddings", False)
+                    if tie:
+                        logits = model.model.embed_tokens.as_linear(hidden)
+                    else:
+                        logits = model.lm_head(hidden)
                     mx.eval(logits)
-                except Exception:
-                    compiled_decode = None
+                    if os.environ.get("HIVECLAW_TELEMETRY", "1") != "0":
+                        norm_np = np.array(steering.last_steered_norm, dtype=np.float32)
+                        real_slots_np = np.array(batch_slots, dtype=np.int32)
+                        Bb = int(batch_slots.shape[0])
+                        clamped = [
+                            int(real_slots_np[i])
+                            for i in range(Bb)
+                            if int(real_slots_np[i]) != -1
+                            and float(norm_np.reshape(-1)[i]) > 2.0
+                        ]
+                        if clamped:
+                            sys.stderr.write(
+                                json.dumps(
+                                    {
+                                        "event": "poison_clamp_batch",
+                                        "slots": clamped,
+                                        "ts_ns": time.time_ns(),
+                                    },
+                                    separators=(",", ":"),
+                                )
+                                + "\n"
+                            )
+                except RuntimeError:
+                    compiled_inner = None
                     logits = model(next_y, cache=cache)
                     _eval_cache_states(cache)
                     mx.eval(logits)
@@ -485,15 +544,16 @@ def generate_batch_session(
                 _eval_cache_states(cache)
                 mx.eval(logits)
 
-            t = mx.argmax(logits[:, -1, :], axis=-1)
-            t = _apply_dummy_token_mask(t, B_active, B_bucket, pad_id)
+            logits_active = logits[:B_active]
+            t = mx.argmax(logits_active[:, -1, :], axis=-1)
             mx.eval(t)
             tok_np = np.asarray(t).reshape(-1)
 
             _emit_row_tokens(
                 tokenizer, entries, tok_np, max_client_queue_depth, eos_pending
             )
-            next_y = mx.reshape(t, (B_bucket, 1))
+            t_b = _pad_token_row_to_bucket(t, B_active, B_bucket, pad_id)
+            next_y = mx.reshape(t_b, (B_bucket, 1))
             step += 1
 
     finally:

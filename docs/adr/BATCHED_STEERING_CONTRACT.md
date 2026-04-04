@@ -20,8 +20,8 @@ Batched primitives live in `crates/hiveclaw-mlx/src/slab_primitives.cpp` and hea
 
 ### `slot_indices`
 
-- Passed as **`mx.array` int32, shape `[B]`** from Python → C++ `std::vector<uint32_t>`.
-- **Duplicates rejected in C++** (`std::set` / uniqueness check).
+- Passed as **`mx.array` int32, shape `[B]`** from Python → C++ `std::vector<uint32_t>` via **value cast** (`int32` **`-1` → `0xFFFFFFFF`** sentinel: no IOSurface access, read row zeros / write no-op / `status=0`).
+- **Duplicates rejected in C++** among **real** slot indices only; sentinels skip range and uniqueness checks.
 - **Row `i` aligns with batch row `i`** — callers must **not** reorder slots vs latents; optional coalescing is the caller’s responsibility (sorting in `SlabClient` would misalign `depends`).
 
 ### Grid / kernels
@@ -63,8 +63,8 @@ Batched primitives live in `crates/hiveclaw-mlx/src/slab_primitives.cpp` and hea
 - **`steer_hidden_batched`:** `read_slots` → decode `matmul(scents_f32, W_enc) + b_dec` → **L2 clamp** on `alpha * decoded` (per row, same as `steer_hidden`) → add to `h_batch`.
 - Telemetry: **`{"event":"poison_clamp_batch","slots":[...],"ts_ns":...}`** (one line per batch when any row clamps).
 - Injection: **last token** only: `h[:, -1:, :]`.
-- **`BatchedSteeringWrapper`:** holds **`current_batch_slots`** (`mx.array` int32 `[B]`), updated each tick when batch membership changes.
-- **`last_steered_h`:** **`[B,1,2048]`** for batched encode + `write_slots`.
+- **`BatchedSteeringWrapper`:** holds **`current_batch_slots`** (`mx.array` int32 **`[B_bucket]`** with **`-1`** dummies), updated each tick when batch membership changes.
+- **`last_steered_h`:** **`[B_bucket,1,2048]`** (full bucket; dummy rows are zeros). **`last_steered_norm`:** **`[B_bucket,1,1]`** for poison-clamp telemetry (host read after `mx.eval`).
 
 ### Encode write-back
 
@@ -115,7 +115,7 @@ Batched primitives live in `crates/hiveclaw-mlx/src/slab_primitives.cpp` and hea
 2. **EOS:** EOS is observed **after** logits; eviction for that row runs at **next** step top (client still receives the EOS token).
 3. **Bucketing (no shrinking):** On first forward of a session, `B_bucket = min(32, next_pow2(B_active_initial))`. If `B_active` shrinks, **`B_bucket` never shrinks** until the batch drains to zero. Prefer masked dummy FLOPs over recompile.
 4. **Dummy rows:** `pad_token_id` (or EOS if undefined). **Attention:** [`HiveClawKVCache`](../../scripts/hiveclaw_kv_mask.py) (installed on the full-attention cache slot) applies an **additive float16 mask** (`-1e4` on masked positions) so dummy rows are **fully blinded** in SDPA on prefill and decode; real rows also mask **left-padded** key columns. Shared KV length across the batch tensor is unchanged. **Steering sandwich** still pads dummies with zeros before the LM head.
-5. **Steering Sandwich (before LM head):** Steering does **not** use dummy rows. On `H_orig [B_bucket,1,2048]`: **(a)** slice to `H_active [B_active,1,2048]`; **(b)** `read_slots` with `depends=H_active`; **torn** rows → zero scents before matmul; decode, L2 clamp, add → `H_steered`; **(c)** `write_slots` encode (`max(matmul(h,W_enc.T)+b_enc,0)` → bf16) with `depends=H_steered`; **(d)** pad with zeros to `[B_bucket,1,2048]`; pass to LM head. Dummy logits discarded.
+5. **Steering Sandwich (before LM head):** Full-bucket static shape — no `[:B_active]` slice on the batch axis. `batch_slots` is **`[B_bucket]` int32** with **`-1`** sentinel for dummy rows (C++ `0xFFFFFFFF`: read zeros / write no-op). On `H_orig [B_bucket,1,2048]`: **(a)** `read_slots(batch_slots, depends=H_orig)` (full bucket); **torn** rows → zero scents; decode, L2 clamp; **(b)** **active mask** `(batch_slots != -1)` zeroes delta on dummies; **(c)** **Sandwich Gate:** `H_steered` is the steered hidden for real rows and **exact zeros** for dummies (before LM head); **(d)** optional `write_slots` over full bucket (sentinel rows no-op in C++). **(e)** LM head / logits: compile boundary ends at transformer inner; **`logits[:B_active]`** is taken in Python on the eager logits tensor. **`last_steered_norm`:** sidecar **`[B_bucket,1,1]`** float32 on `BatchedSteeringWrapper` for host telemetry (`poison_clamp_batch`) after compiled decode steps.
 6. **P95 latency:** Server-side only (time between successive generated tokens for a row); excludes SSE network.
 
 ### KV cache (mlx-lm `KVCache`)
@@ -137,9 +137,9 @@ Batched primitives live in `crates/hiveclaw-mlx/src/slab_primitives.cpp` and hea
 
 ### Phase 7+ — Compiled decode (optional)
 
-- **`HIVECLAW_COMPILE_DECODE=1`:** After prefill, `generate_batch` attempts `mx.compile(decode_step, outputs=<KV keys/values per layer>, shapeless=True)` (falls back to `shapeless=False`, then to **eager** if evaluation throws). **Recompiled** after each eviction (KV arrays are replaced by `mx.take`). Many graphs (e.g. dynamic slice + steering) still **fail compile** on current MLX; the decode loop **catches** and continues eagerly.
-- **`HIVECLAW_COMPILE_WARMUP=1`:** Optional one-shot `mx.eval(compiled(dummy_tokens))` via `warmup_compiled_decode` (caller supplies compiled fn); may advance cache — intended for dedicated warmup harnesses, not mid-session.
-- **Sliding-window models:** `install_hiveclaw_kv_cache` returns **False**; telemetry `hiveclaw_kv_mask_skip` on stderr; standard `KVCache` masks apply (no HiveClaw composite mask).
+- **`HIVECLAW_COMPILE_DECODE=1`:** After prefill, `generate_batch` attempts **`mx.compile(inner_step, outputs=<KV keys/values per layer + steering.last_steered_norm>, shapeless=True)`** where **`inner_step(ny) = model.model(ny, cache=kv_cache)`** — LM head (`embed_tokens.as_linear` / `lm_head`) stays **outside** the compiled region. Falls back to `shapeless=False`, then **eager** `model(...)` if **`RuntimeError`** during compiled eval. **Recompile** after **every** eviction: `mx.take` replaces `keys`/`values` array objects, so `outputs=` must be rebuilt.
+- **`HIVECLAW_COMPILE_WARMUP=1`:** Optional one-shot `mx.eval(compiled(dummy_tokens))` via `warmup_compiled_decode` (caller supplies compiled inner fn); may advance cache — intended for dedicated warmup harnesses, not mid-session.
+- **Sliding-window / SWA models:** `install_hiveclaw_kv_cache` **always succeeds** on supported mlx-lm caches: replaces **`cache[fa_idx]`** with `HiveClawKVCache` or **`HiveClawRotatingKVCache`** (when the slot holds `RotatingKVCache`), and **`cache[swa_idx]`** the same way when **`swa_idx`** is present. Composite masks intersect base causal / ring masks with HiveClaw left-pad and dummy-row blinds.
 
 ### Feature flag
 

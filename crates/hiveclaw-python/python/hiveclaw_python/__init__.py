@@ -16,6 +16,8 @@ except ImportError as e:  # pragma: no cover
 
 _SLAB_SIZE = 4_718_720
 _N_SLOTS = 4096
+# Batched read/write: dummy rows use -1; C++ casts to 0xFFFFFFFF (sentinel, IOSurface no-op).
+SENTINEL_SLOT = -1
 def _validate_write(byte_offset: int, scent: mx.array) -> None:
     if scent.dtype != mx.bfloat16:
         raise ValueError(f"scent must be bfloat16, got {scent.dtype}")
@@ -59,7 +61,7 @@ def _shape_list(shape: list) -> list[int]:
 
 
 def _validate_batch_slots_arr(slots: mx.array) -> int:
-    """int32 [B], unique indices in [0, N_SLOTS). Returns B."""
+    """int32 [B]; real slots unique in [0, N_SLOTS); SENTINEL_SLOT (-1) allowed for dummies."""
     if slots.dtype != mx.int32:
         raise ValueError(f"batch slots must be int32, got {slots.dtype}")
     if len(slots.shape) != 1:
@@ -68,10 +70,12 @@ def _validate_batch_slots_arr(slots: mx.array) -> int:
     flat = np.array(slots, dtype=np.int32).reshape(-1)
     if flat.size == 0:
         raise ValueError("batch slots must be non-empty")
-    if np.unique(flat).size != flat.size:
-        raise ValueError("batch slots must not contain duplicate indices")
-    for x in flat.tolist():
-        if int(x) < 0 or int(x) >= _N_SLOTS:
+    real = flat[flat != SENTINEL_SLOT]
+    if real.size > 0 and np.unique(real).size != real.size:
+        raise ValueError("batch slots: duplicate real slot_index")
+    for x in real.tolist():
+        ix = int(x)
+        if ix < 0 or ix >= _N_SLOTS:
             raise ValueError(f"slot index out of range: {x}")
     return int(flat.size)
 

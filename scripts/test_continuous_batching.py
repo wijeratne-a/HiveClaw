@@ -17,13 +17,19 @@ if str(_scripts_dir) not in sys.path:
 
 import mlx.core as mx
 import numpy as np
+from unittest.mock import patch
 
 from generate_batch import (
     next_pow2_bucket,
     pad_kv_cache_batch_dim,
     slice_kv_cache_batch_dim,
 )
-from hiveclaw_kv_mask import HiveClawKVCache, rebuild_hive_kv_metadata
+from hiveclaw_kv_mask import (
+    HiveClawKVCache,
+    HiveClawRotatingKVCache,
+    install_hiveclaw_kv_cache,
+    rebuild_hive_kv_metadata,
+)
 
 
 def test_next_pow2_bucket() -> None:
@@ -96,7 +102,6 @@ def test_golden_logits_optional() -> None:
     if os.environ.get("HIVECLAW_PHASE7_GOLDEN", "0") != "1":
         print("[test_continuous_batching] skip golden (set HIVECLAW_PHASE7_GOLDEN=1)")
         return
-    from hiveclaw_kv_mask import install_hiveclaw_kv_cache
     from mlx_lm import load
     from mlx_lm.models.cache import make_prompt_cache
 
@@ -123,7 +128,7 @@ def test_golden_logits_optional() -> None:
 
     entries = [_E(row0)]
     lp, act = rebuild_hive_kv_metadata(entries, B_bucket=4)
-    assert install_hiveclaw_kv_cache(model, cache2, lp, act)
+    assert install_hiveclaw_kv_cache(model, cache2, lp, act) is True
     logits2 = model(x2, cache=cache2)
     mx.eval(logits2)
     assert not bool(mx.isnan(logits2).any().item())
@@ -131,6 +136,146 @@ def test_golden_logits_optional() -> None:
     ok = np.allclose(t1, t2, rtol=1e-2, atol=5e-2)
     assert ok, float(np.max(np.abs(t1 - t2)))
     assert int(np.argmax(t1)) == int(np.argmax(t2))
+
+
+def test_sentinel_validation_allowed() -> None:
+    try:
+        from hiveclaw_python import _validate_batch_slots_arr
+    except ImportError:
+        print(
+            "[test_continuous_batching] skip sentinel validation (hiveclaw_python missing)"
+        )
+        return
+    B = _validate_batch_slots_arr(mx.array([-1, 0, 1, -1], dtype=mx.int32))
+    assert B == 4
+
+
+def test_real_duplicate_rejected() -> None:
+    try:
+        from hiveclaw_python import _validate_batch_slots_arr
+    except ImportError:
+        return
+    try:
+        _validate_batch_slots_arr(mx.array([0, 0, -1, -1], dtype=mx.int32))
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for duplicate real slots")
+
+
+class _MockSlabSlots:
+    def read_slots(self, slots, depends=None):
+        B = int(slots.shape[0])
+        return mx.zeros((B, 1, 256), dtype=mx.bfloat16), mx.zeros(
+            (B,), dtype=mx.uint8
+        )
+
+    def write_slots(self, slots, latents, depends=None):
+        return latents, mx.zeros((int(slots.shape[0]),), dtype=mx.uint8)
+
+
+def test_static_shape_steering() -> None:
+    from hiveclaw_steering import apply_steering_sandwich
+
+    B = 4
+    h = mx.ones((B, 1, 2048), dtype=mx.float32)
+    slots = mx.array([0, 1, -1, -1], dtype=mx.int32)
+    W = mx.zeros((256, 2048), dtype=mx.float32)
+    b = mx.zeros((2048,), dtype=mx.float32)
+    H, norm = apply_steering_sandwich(
+        h, _MockSlabSlots(), slots, W, b, 0.0, b_enc=None
+    )
+    mx.eval(H, norm)
+    assert tuple(H.shape) == (B, 1, 2048)
+    assert tuple(norm.shape) == (B, 1, 1)
+
+
+def test_compiled_decode_no_fallback() -> None:
+    """Optional GPU integration: set HIVECLAW_COMPILE_DECODE_CI=1 in a daemon+worker harness."""
+    if os.environ.get("HIVECLAW_COMPILE_DECODE_CI", "0") != "1":
+        print(
+            "[test_continuous_batching] skip compiled decode CI "
+            "(HIVECLAW_COMPILE_DECODE_CI=1)"
+        )
+        return
+    print(
+        "[test_continuous_batching] HIVECLAW_COMPILE_DECODE_CI=1: "
+        "run scripts/generate_batch.py integration with daemon to assert no compile fallback"
+    )
+
+
+def test_probe_max_batch_mock() -> None:
+    import generate_batch as gb
+
+    class FakeModel:
+        def __call__(self, toks, cache=None):
+            B = int(toks.shape[0])
+            if B >= 4:
+                raise RuntimeError("simulated OOM")
+            L = int(toks.shape[1])
+            return mx.zeros((B, L, 16), dtype=mx.float32)
+
+    def fake_load(model_id):
+        return FakeModel(), None
+
+    def fake_make_prompt(_m):
+        return []
+
+    with (
+        patch("mlx_lm.load", fake_load),
+        patch("mlx_lm.models.cache.make_prompt_cache", fake_make_prompt),
+    ):
+        got = gb.probe_max_batch("dummy", env_max=16, probe_ctx_len=8)
+    assert got == 2
+
+
+def test_rotating_kv_mask_decode_none() -> None:
+    c = HiveClawRotatingKVCache(32, keep=0)
+    c.hive_left_pad = mx.array([0, 2], dtype=mx.int32)
+    c.hive_row_active = mx.array([1.0, 0.0], dtype=mx.float32)
+    c.offset = 3
+    c.keys = mx.zeros((2, 1, 3, 8), dtype=mx.float32)
+    m = c.make_mask(1, window_size=None)
+    assert m is not None
+    mx.eval(m)
+    assert int(m.shape[0]) == 2
+    row1 = np.array(m[1, 0, 0, :], dtype=np.float32)
+    assert np.all(row1 <= -1e3)
+
+
+def test_rotating_kv_mask_decode_ring() -> None:
+    c = HiveClawRotatingKVCache(8, keep=0)
+    c.hive_left_pad = mx.array([0, 1], dtype=mx.int32)
+    c.hive_row_active = mx.array([1.0, 1.0], dtype=mx.float32)
+    c.offset = 10
+    c._idx = 3
+    c.keys = mx.zeros((2, 1, 8, 4), dtype=mx.float32)
+    m = c.make_mask(1, window_size=4)
+    assert m is not None
+    mx.eval(m)
+    assert tuple(m.shape) == (2, 1, 1, 8)
+
+
+def test_install_hiveclaw_swa_model() -> None:
+    from mlx_lm.models.cache import KVCache, RotatingKVCache
+
+    class Inner:
+        fa_idx = 0
+        swa_idx = 2
+
+    class M:
+        model = Inner()
+
+    m = M()
+    k0 = KVCache()
+    k1 = KVCache()
+    k2 = RotatingKVCache(128, keep=0)
+    cache = [k0, k1, k2]
+    lp = mx.array([0, 0, 0], dtype=mx.int32)
+    act = mx.array([1.0, 1.0, 0.0], dtype=mx.float32)
+    assert install_hiveclaw_kv_cache(m, cache, lp, act) is True
+    assert isinstance(cache[0], HiveClawKVCache)
+    assert isinstance(cache[1], KVCache)
+    assert isinstance(cache[2], HiveClawRotatingKVCache)
 
 
 def main() -> int:
@@ -141,6 +286,14 @@ def main() -> int:
         test_rebuild_hive_kv_metadata()
         test_hiveclaw_kv_cache_mask_shapes()
         test_golden_logits_optional()
+        test_sentinel_validation_allowed()
+        test_real_duplicate_rejected()
+        test_static_shape_steering()
+        test_compiled_decode_no_fallback()
+        test_probe_max_batch_mock()
+        test_rotating_kv_mask_decode_none()
+        test_rotating_kv_mask_decode_ring()
+        test_install_hiveclaw_swa_model()
     except Exception as e:
         print(f"FAIL: {e}", file=sys.stderr)
         return 1

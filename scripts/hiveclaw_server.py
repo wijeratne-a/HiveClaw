@@ -67,6 +67,7 @@ class ServerContext:
     batch_worker_thread: Any = None
     batch_worker_stop: Any = None
     max_client_queue_depth: int = 50
+    effective_max_batch: int = 8
 
 
 def _config_hidden_size(config: dict) -> int:
@@ -418,14 +419,28 @@ async def lifespan(app: FastAPI):
     continuous = os.environ.get("HIVECLAW_CONTINUOUS_BATCH", "0") == "1"
     app.state.continuous_batch = continuous
     if continuous:
-        from generate_batch import start_swarm_batch_worker
+        from generate_batch import probe_max_batch, start_swarm_batch_worker
 
         ctx.max_client_queue_depth = int(
             os.environ.get("HIVECLAW_MAX_QUEUE_DEPTH", "50")
         )
+        env_max_batch = int(os.environ.get("HIVECLAW_MAX_BATCH", "8"))
+        probe_ctx = min(
+            int(os.environ.get("HIVECLAW_PROBE_CTX", "4096")),
+            int(ctx.hf_config.get("max_position_embeddings", 4096)),
+        )
+        probed_max = await loop.run_in_executor(
+            None, probe_max_batch, MODEL_ID, env_max_batch, probe_ctx
+        )
+        effective_max_batch = min(probed_max, env_max_batch)
+        ctx.effective_max_batch = int(effective_max_batch)
+        print(
+            f"[hiveclaw_server] OOM probe: max safe batch={effective_max_batch}",
+            flush=True,
+        )
         mq, th, st = start_swarm_batch_worker(
             ctx,
-            max_batch=int(os.environ.get("HIVECLAW_MAX_BATCH", "8")),
+            max_batch=effective_max_batch,
             max_client_queue_depth=ctx.max_client_queue_depth,
         )
         ctx.master_queue = mq
@@ -506,6 +521,16 @@ async def _chat_completions_batched_stream(
         loop=loop,
         cancelled=cancelled,
     )
+
+    queue_depth = ctx.master_queue.qsize()
+    if queue_depth >= ctx.max_client_queue_depth:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Swarm capacity reached",
+                "queue_depth": queue_depth,
+            },
+        )
 
     await loop.run_in_executor(None, ctx.master_queue.put, job)
 

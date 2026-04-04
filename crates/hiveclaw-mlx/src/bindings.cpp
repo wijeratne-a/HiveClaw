@@ -54,9 +54,7 @@ static std::vector<uint32_t> slots_array_to_indices(const array& slot_indices) {
     std::vector<uint32_t> out;
     out.reserve(n);
     for (size_t i = 0; i < n; ++i) {
-        if (p[i] < 0) {
-            throw std::invalid_argument("slot_indices must be non-negative");
-        }
+        // int32 -1 → uint32 0xFFFFFFFF (batched sentinel; validated in C++).
         out.push_back(static_cast<uint32_t>(p[i]));
     }
     return out;
