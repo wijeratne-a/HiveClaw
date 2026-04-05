@@ -44,10 +44,12 @@ DEFAULT_MODEL_NAME = "hiveclaw-llama-1b"
 # Serialize all MLX + layer-swap work (executor thread vs stream worker thread).
 _MLX_LOCK = threading.Lock()
 
-FATAL_LINE = (
-    "pheromoned is not running under launchd. From repo root: "
-    "`cargo build --release -p hiveclaw-daemon` then `make daemon-load`. "
-    "See scripts/README.md."
+FATAL_LINES = (
+    "pheromoned is not running under launchd, or XPC handshake failed.",
+    "From repo root:  make doctor",
+    "Then:  cargo build --release -p hiveclaw-daemon && make daemon-load",
+    "(Use Terminal.app if launchctl returns EIO in an IDE terminal.)",
+    "See scripts/README.md.",
 )
 
 
@@ -162,7 +164,8 @@ def _sync_startup() -> ServerContext:
 
         slab_client = hiveclaw_python.SlabClient()
     except Exception:
-        print(FATAL_LINE, file=sys.stderr)
+        for line in FATAL_LINES:
+            print(line, file=sys.stderr)
         raise SystemExit(1) from None
 
     check_latent_dim(slab_client)

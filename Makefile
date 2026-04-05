@@ -1,5 +1,5 @@
 # HiveClaw — Phase 4: XPC Mach service + IOSurface + PyO3.
-.PHONY: build build-release poc clean test-ipc python python-clean python-check-maturin spike-deps daemon-load daemon-unload daemon-uninstall daemon-status
+.PHONY: build build-release poc clean test-ipc python python-clean python-check-maturin spike-deps daemon-load daemon-unload daemon-uninstall daemon-status doctor
 
 ROOT := $(abspath .)
 PBIN := $(ROOT)/target/release/pheromoned
@@ -117,6 +117,9 @@ daemon-load: build-release
 			exit 1; \
 		fi; \
 	fi
+
+doctor:
+	@"$(MATURIN_PYTHON)" "$(ROOT)/scripts/hiveclaw_doctor.py" "$(ROOT)" "$(PBIN)"
 
 daemon-status:
 	@launchctl print "$(HIVECLAW_GUI_DOMAIN)/com.hiveclaw.pheromoned" 2>/dev/null || echo "(not loaded in $(HIVECLAW_GUI_DOMAIN) — run make daemon-load from Terminal.app)"

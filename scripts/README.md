@@ -16,7 +16,7 @@ cd ~/dev/HiveClaw
 
 ### Slab v5 (XPC `get_surface_v5`, 640-byte slots, 256-D SAE latent)
 
-The PyO3 client handshakes with **`cmd=get_surface_v5`**; the daemon replies with **`surface_id`** and **`magic_version`** (`0x48434C5700000005`). Any other command (including legacy surface handshakes) receives **`error`** = **`INVALID_COMMAND_OR_UNSUPPORTED_VERSION`**.
+The PyO3 client handshakes with **`cmd=get_surface_v5`**; the daemon replies with **`surface_id`**, **`magic_version`** (`0x48434C5700000005`), and optional identity strings **`daemon_exe`** (absolute path of `pheromoned`) and **`daemon_crate_version`** (hiveclaw-daemon crate version). Any other command (including legacy surface handshakes) receives **`error`** = **`INVALID_COMMAND_OR_UNSUPPORTED_VERSION`**.
 
 **Layout:** global header **4096** bytes (magic `u64` @ 0, version `u32` @ 8, `n_slots` @ 12, `stride` @ 16). Each slot is **640** bytes: 64-byte header (`slot_state`, Mach `last_claim`, `front_epoch`), **256×bf16** payload (512 B), 64-byte footer with **`back_epoch` at +576** from slot base. Writers bump **`front_epoch`**, copy **512** B, set **`back_epoch`**. **`read_slot_v5` / `WriteSlab`** enforce torn detection (zeros on mismatch); C++ may emit **`torn_epoch_skip`** to stderr unless **`HIVECLAW_TELEMETRY=0`**. LLM scripts use a **trained SAE** in **`models/hiveclaw_sae_v1.safetensors`** (see `scripts/harvester.py`, `scripts/train_sae.py`).
 
@@ -33,6 +33,10 @@ python scripts/integration_test.py --batched   # read_slots / write_slots (daemo
 **Phase 6 batched steering:** `scripts/test_batched_steering.py` exercises `read_slots`, `write_slots`, and `steer_hidden_batched` (requires daemon + `models/hiveclaw_sae_v1.safetensors`). Do **not** run MLX integration or batched tests while **`scripts/harvester.py`** (or another Metal-heavy workload) is using the same GPU — contention can flake reads/writes. **`make python`** only builds native extensions; it never runs those tests.
 
 **Phase 7 continuous batching:** Set **`HIVECLAW_CONTINUOUS_BATCH=1`** and install **`scripts/requirements-server.txt`** (includes **`mlx-lm`** pin). **`python scripts/hiveclaw_server.py`** then uses a **`swarm_batch_worker`** thread and **`stream=true`** only. Helpers: **`scripts/generate_batch.py`**, **`scripts/hiveclaw_kv_mask.py`** (`HiveClawKVCache` masks). Tests: **`scripts/test_continuous_batching.py`** (KV slice/pad, mask shapes; optional golden via **`HIVECLAW_PHASE7_GOLDEN=1`**). Optional **`HIVECLAW_COMPILE_DECODE=1`** (experimental compiled decode; falls back to eager on error), **`HIVECLAW_COMPILE_WARMUP=1`** (see ADR). See **`docs/adr/BATCHED_STEERING_CONTRACT.md`** Phase 7.
+
+**Doctor (macOS):** After **`make python`** and **`make daemon-load`**, run **`make doctor`** from the same repo root. It checks **`launchctl print gui/$UID/com.hiveclaw.pheromoned`** (running state, **`program`** path vs **`target/release/pheromoned`**) and **`SlabClient()`**. If integration tests show **`magic_version 0x0`** or **`Connection invalid`**, the loaded daemon usually does not match this checkout or is not running—fix with **`make daemon-uninstall && make daemon-load`** (one canonical tree; rebuild release before reload).
+
+**CI / smoke (macOS):** On a self-hosted or interactive Mac with GPU and venv ready, **`bash scripts/ci_mac_smoke.sh`** runs **`make doctor`** then **`scripts/integration_test.py --quick`**.
 
 ---
 

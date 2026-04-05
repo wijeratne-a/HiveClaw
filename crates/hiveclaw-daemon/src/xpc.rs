@@ -3,9 +3,8 @@
 use block2::{Block, RcBlock};
 use hiveclaw_backend_metal::MetalPheromoneBuffer;
 use hiveclaw_core::math::{
-    N_SLOTS, OFF_G_DECAY_RATE, OFF_G_MAGIC_V5, OFF_G_N_SLOTS_V5, OFF_G_STRIDE_V5,
-    OFF_G_VERSION_V5, OFF_G_ZETA_T, PHASE_C_BYTES, SLAB_SIZE, SLAB_VERSION_V5,
-    layout_magic_version_u64,
+    layout_magic_version_u64, N_SLOTS, OFF_G_DECAY_RATE, OFF_G_MAGIC_V5, OFF_G_N_SLOTS_V5,
+    OFF_G_STRIDE_V5, OFF_G_VERSION_V5, OFF_G_ZETA_T, PHASE_C_BYTES, SLAB_SIZE, SLAB_VERSION_V5,
 };
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
@@ -136,12 +135,7 @@ pub fn fetch_surface_v5() -> Result<(u32, u64), String> {
         return Err("xpc_connection_send_message_with_reply_sync returned NULL".into());
     }
 
-    let err_ptr = unsafe {
-        xpc_dictionary_get_string(
-            reply,
-            b"error\0".as_ptr().cast::<c_char>(),
-        )
-    };
+    let err_ptr = unsafe { xpc_dictionary_get_string(reply, b"error\0".as_ptr().cast::<c_char>()) };
     if !err_ptr.is_null() {
         let msg = unsafe { CStr::from_ptr(err_ptr).to_string_lossy().into_owned() };
         unsafe {
@@ -151,18 +145,10 @@ pub fn fetch_surface_v5() -> Result<(u32, u64), String> {
         return Err(msg);
     }
 
-    let sid = unsafe {
-        xpc_dictionary_get_uint64(
-            reply,
-            b"surface_id\0".as_ptr().cast::<c_char>(),
-        )
-    };
-    let magic_version = unsafe {
-        xpc_dictionary_get_uint64(
-            reply,
-            b"magic_version\0".as_ptr().cast::<c_char>(),
-        )
-    };
+    let sid =
+        unsafe { xpc_dictionary_get_uint64(reply, b"surface_id\0".as_ptr().cast::<c_char>()) };
+    let magic_version =
+        unsafe { xpc_dictionary_get_uint64(reply, b"magic_version\0".as_ptr().cast::<c_char>()) };
     unsafe {
         xpc_release(reply);
         xpc_release(conn as XpcObjectT);
@@ -208,9 +194,7 @@ unsafe fn initialize_global_header(base: *mut u8, decay_rate: f32) {
     (p.add(OFF_G_MAGIC_V5) as *mut u64).write_unaligned(layout_magic_version_u64());
     (p.add(OFF_G_VERSION_V5) as *mut u32).write_unaligned(SLAB_VERSION_V5);
     (p.add(OFF_G_N_SLOTS_V5) as *mut u32).write_unaligned(N_SLOTS as u32);
-    (p.add(OFF_G_STRIDE_V5) as *mut u32).write_unaligned(
-        hiveclaw_core::math::SLOT_STRIDE as u32,
-    );
+    (p.add(OFF_G_STRIDE_V5) as *mut u32).write_unaligned(hiveclaw_core::math::SLOT_STRIDE as u32);
     (p.add(OFF_G_ZETA_T) as *mut f32).write_volatile(0.0);
     (p.add(OFF_G_DECAY_RATE) as *mut f32).write_volatile(decay_rate);
 }
@@ -246,6 +230,10 @@ pub fn run_pheromoned_daemon() -> ! {
         "xpc_connection_create_mach_service(LISTENER) failed — is launchd MachServices registered?"
     );
 
+    let daemon_exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "(unknown)".to_string());
+
     let listener_block = RcBlock::new(move |event: *mut c_void| {
         if event.is_null() {
             return;
@@ -258,6 +246,7 @@ pub fn run_pheromoned_daemon() -> ! {
             if is_xpc_type(event, b"connection") {
                 let peer = event as XpcConnectionT;
                 let sid = surface_id;
+                let exe_for_peer = daemon_exe.clone();
 
                 let peer_block = RcBlock::new(move |msg: *mut c_void| {
                     if msg.is_null() {
@@ -265,9 +254,7 @@ pub fn run_pheromoned_daemon() -> ! {
                     }
                     if is_connection_invalid(msg) {
                         SLOT_0_DIRTY.store(true, Ordering::SeqCst);
-                        eprintln!(
-                            "[pheromoned] client disconnected — slot 0 marked dirty"
-                        );
+                        eprintln!("[pheromoned] client disconnected — slot 0 marked dirty");
                         return;
                     }
 
@@ -275,10 +262,8 @@ pub fn run_pheromoned_daemon() -> ! {
                         return;
                     }
 
-                    let cmd_ptr = xpc_dictionary_get_string(
-                        msg,
-                        b"cmd\0".as_ptr().cast::<c_char>(),
-                    );
+                    let cmd_ptr =
+                        xpc_dictionary_get_string(msg, b"cmd\0".as_ptr().cast::<c_char>());
                     if cmd_ptr.is_null() {
                         return;
                     }
@@ -295,7 +280,9 @@ pub fn run_pheromoned_daemon() -> ! {
                         xpc_dictionary_set_string(
                             reply,
                             b"error\0".as_ptr().cast::<c_char>(),
-                            b"INVALID_COMMAND_OR_UNSUPPORTED_VERSION\0".as_ptr().cast::<c_char>(),
+                            b"INVALID_COMMAND_OR_UNSUPPORTED_VERSION\0"
+                                .as_ptr()
+                                .cast::<c_char>(),
                         );
                         xpc_connection_send_message(peer, reply);
                         xpc_release(reply);
@@ -312,6 +299,20 @@ pub fn run_pheromoned_daemon() -> ! {
                         b"magic_version\0".as_ptr().cast::<c_char>(),
                         layout_magic_version_u64(),
                     );
+                    if let Ok(exe_c) = CString::new(exe_for_peer.as_str()) {
+                        xpc_dictionary_set_string(
+                            reply,
+                            b"daemon_exe\0".as_ptr().cast::<c_char>(),
+                            exe_c.as_ptr(),
+                        );
+                    }
+                    if let Ok(ver_c) = CString::new(env!("CARGO_PKG_VERSION")) {
+                        xpc_dictionary_set_string(
+                            reply,
+                            b"daemon_crate_version\0".as_ptr().cast::<c_char>(),
+                            ver_c.as_ptr(),
+                        );
+                    }
                     xpc_connection_send_message(peer, reply);
                     xpc_release(reply);
                 });

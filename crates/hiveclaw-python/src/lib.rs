@@ -53,6 +53,16 @@ unsafe fn is_xpc_type(obj: XpcObjectT, name: &[u8]) -> bool {
     CStr::from_ptr(p).to_bytes() == name
 }
 
+unsafe fn xpc_object_description(obj: XpcObjectT) -> Option<String> {
+    let d = xpc_copy_description(obj);
+    if d.is_null() {
+        return None;
+    }
+    let s = CStr::from_ptr(d).to_string_lossy().into_owned();
+    libc::free(d.cast());
+    Some(s)
+}
+
 /// Owns an `xpc_connection_t`; released on drop so daemon sees invalidation when `SlabClient` is GC'd.
 struct XpcConn(XpcConnectionT);
 
@@ -83,10 +93,7 @@ fn connect_and_fetch_surface_v5() -> Result<(XpcConn, u32), String> {
             if is_xpc_type(evt, b"error") {
                 let d = xpc_copy_description(evt);
                 if !d.is_null() {
-                    eprintln!(
-                        "[hiveclaw_python] {}",
-                        CStr::from_ptr(d).to_string_lossy()
-                    );
+                    eprintln!("[hiveclaw_python] {}", CStr::from_ptr(d).to_string_lossy());
                     libc::free(d.cast());
                 }
             }
@@ -126,12 +133,7 @@ fn connect_and_fetch_surface_v5() -> Result<(XpcConn, u32), String> {
         return Err("xpc_connection_send_message_with_reply_sync returned NULL".into());
     }
 
-    let err_ptr = unsafe {
-        xpc_dictionary_get_string(
-            reply,
-            b"error\0".as_ptr().cast::<c_char>(),
-        )
-    };
+    let err_ptr = unsafe { xpc_dictionary_get_string(reply, b"error\0".as_ptr().cast::<c_char>()) };
     if !err_ptr.is_null() {
         let msg = unsafe { CStr::from_ptr(err_ptr).to_string_lossy().into_owned() };
         unsafe {
@@ -141,18 +143,28 @@ fn connect_and_fetch_surface_v5() -> Result<(XpcConn, u32), String> {
         return Err(msg);
     }
 
-    let sid = unsafe {
-        xpc_dictionary_get_uint64(
-            reply,
-            b"surface_id\0".as_ptr().cast::<c_char>(),
-        )
+    let sid =
+        unsafe { xpc_dictionary_get_uint64(reply, b"surface_id\0".as_ptr().cast::<c_char>()) };
+    let magic_version =
+        unsafe { xpc_dictionary_get_uint64(reply, b"magic_version\0".as_ptr().cast::<c_char>()) };
+    let daemon_exe = unsafe {
+        let p = xpc_dictionary_get_string(reply, b"daemon_exe\0".as_ptr().cast::<c_char>());
+        if p.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(p).to_string_lossy().into_owned())
+        }
     };
-    let magic_version = unsafe {
-        xpc_dictionary_get_uint64(
-            reply,
-            b"magic_version\0".as_ptr().cast::<c_char>(),
-        )
+    let daemon_crate_version = unsafe {
+        let p =
+            xpc_dictionary_get_string(reply, b"daemon_crate_version\0".as_ptr().cast::<c_char>());
+        if p.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(p).to_string_lossy().into_owned())
+        }
     };
+    let reply_desc = unsafe { xpc_object_description(reply) };
     unsafe {
         xpc_release(reply);
     }
@@ -162,10 +174,33 @@ fn connect_and_fetch_surface_v5() -> Result<(XpcConn, u32), String> {
         unsafe {
             xpc_release(conn as XpcObjectT);
         }
-        return Err(format!(
+        let mut parts = vec![format!(
             "layout magic_version mismatch: got 0x{magic_version:x}, expected 0x{expected:x}"
-        ));
+        )];
+        if magic_version == 0 {
+            parts.push(
+                "magic_version 0x0 usually means an empty or non-v5 reply (service unloaded, wrong/stale pheromoned binary, or XPC connection invalid).".into(),
+            );
+        }
+        if let Some(ref exe) = daemon_exe {
+            parts.push(format!("daemon reported exe: {exe}"));
+        }
+        if let Some(ref ver) = daemon_crate_version {
+            parts.push(format!("daemon reported crate version: {ver}"));
+        }
+        if let Some(desc) = reply_desc {
+            parts.push(format!("full XPC reply: {desc}"));
+        }
+        parts.push("From repo root run: make doctor".into());
+        return Err(parts.join(" | "));
     }
+
+    eprintln!(
+        "[hiveclaw_python] XPC v5 handshake ok surface_id={} pheromoned_exe={} daemon_crate={}",
+        sid,
+        daemon_exe.as_deref().unwrap_or("(missing)"),
+        daemon_crate_version.as_deref().unwrap_or("(missing)"),
+    );
 
     Ok((XpcConn(conn), sid as u32))
 }
@@ -195,7 +230,9 @@ impl SlabClient {
     pub fn new() -> PyResult<Self> {
         let (xpc_conn, id) = connect_and_fetch_surface_v5().map_err(|e| {
             PyValueError::new_err(format!(
-                "XPC handshake failed (is pheromoned running under launchd?): {e}"
+                "XPC handshake failed (is pheromoned running under launchd?): {e}\n\
+                 From repo root: make doctor   (checks launchctl program path vs target/release/pheromoned and SlabClient). \
+                 Then: cargo build --release -p hiveclaw-daemon && make daemon-load (use Terminal.app if launchctl returns EIO in an IDE terminal)."
             ))
         })?;
         let buf = MetalPheromoneBuffer::from_surface_id(id);
@@ -254,7 +291,9 @@ impl SlabClient {
         fence(Ordering::SeqCst);
         let out: Vec<f32> = unsafe {
             let src = base.add(byte_offset) as *const bf16;
-            (0..num_elements).map(|i| src.add(i).read().to_f32()).collect()
+            (0..num_elements)
+                .map(|i| src.add(i).read().to_f32())
+                .collect()
         };
         Ok(out)
     }
