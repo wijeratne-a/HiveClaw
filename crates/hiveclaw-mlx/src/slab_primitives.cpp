@@ -107,8 +107,7 @@ kernel void read_slab_v5(
 )";
 
 // Batched v5 read: Z = batch index; 32 threads × 8 uint16 per row; per-row torn → status_out[b]=1.
-// If a future Metal dispatch uses this kernel, handle HIVECLAW_SENTINEL_SLOT (0xFFFFFFFF) with
-// masked no-ops (not per-thread early return) so threadgroup barriers remain well-formed.
+// Dummy rows: slot_index 0xFFFFFFFF → zero row, status_out[b]=0, no slab load (barrier-safe).
 static const char* READ_V5_BATCHED_MSL = R"(
 #include <metal_stdlib>
 using namespace metal;
@@ -128,12 +127,30 @@ kernel void read_slab_v5_batched(
     uint tid [[thread_index_in_threadgroup]]) {
   uint b = tgp.z;
   uint slot_index = slot_indices[b];
+  device uint16_t* row = h_out + (b * 256u);
+
+  threadgroup uint is_sentinel;
+  if (tid == 0u) {
+    is_sentinel = (slot_index == 0xFFFFFFFFu) ? 1u : 0u;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  if (is_sentinel != 0u) {
+    for (uint k = 0u; k < 8u; k++) {
+      uint i = tid * 8u + k;
+      row[i] = 0u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+      status_out[b] = 0u;
+    }
+    return;
+  }
+
   uint slot_base = HCLW_GLOBAL_HDR + slot_index * HCLW_SLOT_STRIDE;
   threadgroup uint front_ep;
   threadgroup uint back_ep;
   threadgroup uint torn;
-
-  device uint16_t* row = h_out + (b * 256u);
 
   if (tid == 0u) {
     front_ep = *reinterpret_cast<const device uint32_t*>(slab + slot_base + OFF_S_FRONT_EPOCH);
@@ -169,8 +186,9 @@ kernel void read_slab_v5_batched(
 }
 )";
 
-// Batched v5 write: Z = batch row; claim check; epoch-stamped payload (Metal path TBD — eval_gpu uses CPU).
-// If activated on GPU, add sentinel-row masking for 0xFFFFFFFF (same barrier constraints as READ_V5_BATCHED_MSL).
+// Batched v5 write: Z = batch row; claim check; epoch-stamped payload.
+// Dummy rows: 0xFFFFFFFF → status_out[b]=0, no slab / epoch mutation (all threads exit after shared barriers).
+// status_out is device (read-write), matching the Ironclad input_rw_status intent at the C++/MSL layer.
 static const char* WRITE_V5_BATCHED_MSL = R"(
 #include <metal_stdlib>
 using namespace metal;
@@ -194,20 +212,39 @@ kernel void write_slab_v5_batched(
     uint tid [[thread_index_in_threadgroup]]) {
   uint b = tgp.z;
   uint slot_index = slot_indices[b];
-  uint slot_base = HCLW_GLOBAL_HDR + slot_index * HCLW_SLOT_STRIDE;
-  device uint8_t* sh = slab + slot_base;
+
+  threadgroup uint is_sentinel;
+  if (tid == 0u) {
+    is_sentinel = (slot_index == 0xFFFFFFFFu) ? 1u : 0u;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  uint slot_base = 0u;
+  device uint8_t* sh = slab;
+  if (is_sentinel == 0u) {
+    slot_base = HCLW_GLOBAL_HDR + slot_index * HCLW_SLOT_STRIDE;
+    sh = slab + slot_base;
+  }
+
   threadgroup uint epoch_val;
   threadgroup uint lost;
 
   if (tid == 0u) {
     lost = 0u;
-    uint32_t word = *reinterpret_cast<const device uint32_t*>(sh + OFF_S_CLAIM_FLAG);
-    if ((word & HCLW_SLOT_STATUS_MASK) != HCLW_SLOT_STATUS_CLAIMED) {
-      status_out[b] = 2u;
-      lost = 1u;
+    if (is_sentinel != 0u) {
+      status_out[b] = 0u;
+    } else {
+      uint32_t word = *reinterpret_cast<const device uint32_t*>(sh + OFF_S_CLAIM_FLAG);
+      if ((word & HCLW_SLOT_STATUS_MASK) != HCLW_SLOT_STATUS_CLAIMED) {
+        status_out[b] = 2u;
+        lost = 1u;
+      }
     }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (is_sentinel != 0u) {
+    return;
+  }
   if (lost != 0u) {
     return;
   }
@@ -240,6 +277,18 @@ static bool hiveclaw_telemetry_enabled() {
         return true;
     }
     return std::string(e) != "0";
+}
+
+/// Opt-in: batched read uses Metal + shared staging buffer (see ReadSlabBatchedOp::eval_gpu).
+static bool hiveclaw_gpu_batch_read_enabled() {
+    const char* e = std::getenv("HIVECLAW_GPU_BATCH_READ");
+    return e != nullptr && std::string(e) == "1";
+}
+
+/// Opt-in: batched write dispatches WRITE_V5_BATCHED_MSL (IOSurface + status_out device buffer).
+static bool hiveclaw_gpu_batch_write_enabled() {
+    const char* e = std::getenv("HIVECLAW_GPU_BATCH_WRITE");
+    return e != nullptr && std::string(e) == "1";
 }
 
 static void emit_read_v5_telemetry(uint8_t st, uint32_t slot_id) {
@@ -880,11 +929,78 @@ void ReadSlabBatchedOp::eval_cpu(
 void ReadSlabBatchedOp::eval_gpu(
     const std::vector<array>& inputs,
     std::vector<array>& outputs) {
-    // IOSurface + MLX output buffer interaction for multi-row GPU read hit
-    // kIOGPUCommandBufferCallbackErrorInvalidResource on some driver paths; use
-    // CPU batched path (still one primitive, no Python GIL loop). MSL kept in
-    // READ_V5_BATCHED_MSL for a future Metal-only fast path.
-    eval_cpu(inputs, outputs);
+    if (!hiveclaw_gpu_batch_read_enabled()) {
+        eval_cpu(inputs, outputs);
+        return;
+    }
+    (void)inputs;
+    auto& out = outputs[0];
+    const uint32_t B = static_cast<uint32_t>(slot_indices_.size());
+
+    auto& d = mlx::core::metal::device(stream().device);
+    MTL::Device* mtl_dev = d.mtl_device();
+    if (mtl_dev == nullptr) {
+        eval_cpu(inputs, outputs);
+        return;
+    }
+
+    const size_t idx_nbytes = slot_indices_.size() * sizeof(uint32_t);
+    MTL::Buffer* idx_buf =
+        mtl_dev->newBuffer(static_cast<NS::UInteger>(idx_nbytes), MTL::ResourceStorageModeShared);
+    if (idx_buf == nullptr) {
+        eval_cpu(inputs, outputs);
+        return;
+    }
+    std::memcpy(idx_buf->contents(), slot_indices_.data(), idx_nbytes);
+
+    const size_t staging_nbytes =
+        static_cast<size_t>(B) * static_cast<size_t>(HCLW_SCENT_ELEMS) * sizeof(uint16_t);
+    MTL::Buffer* staging =
+        mtl_dev->newBuffer(static_cast<NS::UInteger>(staging_nbytes), MTL::ResourceStorageModeShared);
+    if (staging == nullptr) {
+        idx_buf->release();
+        eval_cpu(inputs, outputs);
+        return;
+    }
+    std::memset(staging->contents(), 0, staging_nbytes);
+
+    out.set_data(mlx::core::allocator::malloc(out.nbytes()));
+
+    auto& enc = d.get_command_encoder(stream().index);
+    auto* lib = d.get_library(
+        "hiveclaw_read_slab_v5_batched",
+        [] { return std::string(READ_V5_BATCHED_MSL); });
+    auto* kernel = d.get_kernel("read_slab_v5_batched", lib);
+    enc.set_compute_pipeline_state(kernel);
+
+    // Shared staging: avoids binding MLX output arrays directly with IOSurface-backed slab
+    // (kIOGPUCommandBufferCallbackErrorInvalidResource on some driver paths).
+    enc.set_buffer(slab_buf_, 0, 0);
+    enc.set_buffer(staging, 1, 0);
+    enc.set_buffer(status_ctx_->buf(), 2, 0);
+    enc.set_buffer(idx_buf, 3, 0);
+
+    enc.dispatch_threadgroups(
+        MTL::Size(1, 1, static_cast<NS::UInteger>(B)),
+        MTL::Size(32, 1, 1));
+
+    MTL::CommandBuffer* cb = d.get_command_buffer(stream().index);
+    if (cb == nullptr) {
+        staging->release();
+        idx_buf->release();
+        eval_cpu(inputs, outputs);
+        return;
+    }
+    cb->commit();
+    cb->waitUntilCompleted();
+
+    std::memcpy(out.data<uint16_t>(), staging->contents(), staging_nbytes);
+
+    uint8_t* st = static_cast<uint8_t*>(status_ctx_->buf()->contents());
+    emit_torn_batch_telemetry(st, B, slot_indices_);
+
+    staging->release();
+    idx_buf->release();
 }
 
 std::vector<array> ReadSlabBatchedOp::jvp(
@@ -1044,7 +1160,59 @@ void WriteSlabBatchedOp::eval_cpu(
 void WriteSlabBatchedOp::eval_gpu(
     const std::vector<array>& inputs,
     std::vector<array>& outputs) {
-    eval_cpu(inputs, outputs);
+    if (!hiveclaw_gpu_batch_write_enabled()) {
+        eval_cpu(inputs, outputs);
+        return;
+    }
+    auto& in = inputs[0];
+    auto& out = outputs[0];
+    const uint32_t B = static_cast<uint32_t>(slot_indices_.size());
+
+    auto& d = mlx::core::metal::device(stream().device);
+    MTL::Device* mtl_dev = d.mtl_device();
+    if (mtl_dev == nullptr) {
+        eval_cpu(inputs, outputs);
+        return;
+    }
+
+    const size_t idx_nbytes = slot_indices_.size() * sizeof(uint32_t);
+    MTL::Buffer* idx_buf =
+        mtl_dev->newBuffer(static_cast<NS::UInteger>(idx_nbytes), MTL::ResourceStorageModeShared);
+    if (idx_buf == nullptr) {
+        eval_cpu(inputs, outputs);
+        return;
+    }
+    std::memcpy(idx_buf->contents(), slot_indices_.data(), idx_nbytes);
+
+    auto& enc = d.get_command_encoder(stream().index);
+    auto* lib = d.get_library(
+        "hiveclaw_write_slab_v5_batched",
+        [] { return std::string(WRITE_V5_BATCHED_MSL); });
+    auto* kernel = d.get_kernel("write_slab_v5_batched", lib);
+    enc.set_compute_pipeline_state(kernel);
+
+    // status_out is device uint8_t* (read-write in MSL), matching Ironclad input_rw_status intent
+    // at the native layer (no const on status buffer).
+    enc.set_buffer(slab_buf_, 0, 0);
+    enc.set_input_array(in, 1);
+    enc.set_buffer(status_ctx_->buf(), 2, 0);
+    enc.set_buffer(idx_buf, 3, 0);
+
+    enc.dispatch_threadgroups(
+        MTL::Size(1, 1, static_cast<NS::UInteger>(B)),
+        MTL::Size(32, 1, 1));
+
+    MTL::CommandBuffer* cb = d.get_command_buffer(stream().index);
+    if (cb == nullptr) {
+        idx_buf->release();
+        eval_cpu(inputs, outputs);
+        return;
+    }
+    cb->commit();
+    cb->waitUntilCompleted();
+
+    out.copy_shared_buffer(in);
+    idx_buf->release();
 }
 
 std::vector<array> WriteSlabBatchedOp::jvp(

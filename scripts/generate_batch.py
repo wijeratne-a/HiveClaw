@@ -178,13 +178,35 @@ def _pad_token_row_to_bucket(
     return mx.concatenate([t, tail], axis=0)
 
 
+def _emit_compile_status(
+    compiled_inner: Callable[[mx.array], mx.array] | None, B_bucket: int
+) -> None:
+    """Ironclad telemetry: whether decode-step mx.compile succeeded for this cache snapshot."""
+    sys.stderr.write(
+        json.dumps(
+            {
+                "event": "compile_status",
+                "compiled": compiled_inner is not None,
+                "B_bucket": int(B_bucket),
+                "ts_ns": time.time_ns(),
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    sys.stderr.flush()
+
+
 def _try_compile_inner_step(
     model: Any,
     kv_cache: list[Any],
     steering_wrapper: Any,
 ) -> Callable[[mx.array], mx.array] | None:
-    """Compile ``model.model`` only (transformer inner); LM head stays eager."""
-    if os.environ.get("HIVECLAW_COMPILE_DECODE", "0") != "1":
+    """Compile ``model.model`` only (transformer inner); LM head stays eager.
+
+    Compiled decode is **on** by default; set ``HIVECLAW_COMPILE_DECODE=0`` to disable.
+    """
+    if os.environ.get("HIVECLAW_COMPILE_DECODE", "1") == "0":
         return None
     outputs = _kv_compile_output_arrays(kv_cache)
     if len(outputs) < 2:
@@ -443,6 +465,7 @@ def generate_batch_session(
         _eval_cache_states(cache)
         mx.eval(logits)
         compiled_inner = _try_compile_inner_step(model, cache, steering)
+        _emit_compile_status(compiled_inner, B_bucket)
 
         logits_active = logits[:B_active0]
         t = mx.argmax(logits_active[:, -1, :], axis=-1)
@@ -464,6 +487,7 @@ def generate_batch_session(
             lp0, act0 = rebuild_hive_kv_metadata(entries, B_bucket)
             sync_hive_metadata_to_fa_cache(cache, model, lp0, act0)
             compiled_inner = _try_compile_inner_step(model, cache, steering)
+            _emit_compile_status(compiled_inner, B_bucket)
 
         B_active = len(entries)
         if B_active == 0:
@@ -496,6 +520,7 @@ def generate_batch_session(
                 lp1, act1 = rebuild_hive_kv_metadata(entries, B_bucket)
                 sync_hive_metadata_to_fa_cache(cache, model, lp1, act1)
                 compiled_inner = _try_compile_inner_step(model, cache, steering)
+                _emit_compile_status(compiled_inner, B_bucket)
 
             B_active = len(entries)
             if B_active == 0:
@@ -536,8 +561,21 @@ def generate_batch_session(
                                 )
                                 + "\n"
                             )
-                except RuntimeError:
+                except RuntimeError as e:
                     compiled_inner = None
+                    sys.stderr.write(
+                        json.dumps(
+                            {
+                                "event": "eager_fallback",
+                                "reason": str(e),
+                                "step": int(step),
+                                "ts_ns": time.time_ns(),
+                            },
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
+                    sys.stderr.flush()
                     logits = model(next_y, cache=cache)
                     _eval_cache_states(cache)
                     mx.eval(logits)

@@ -454,6 +454,13 @@ async def lifespan(app: FastAPI):
             f"(max_queue_depth={ctx.max_client_queue_depth})",
             flush=True,
         )
+        _cde = os.environ.get("HIVECLAW_COMPILE_DECODE", "1")
+        print(
+            "[hiveclaw_server] decode compile: "
+            f"HIVECLAW_COMPILE_DECODE={_cde!r} "
+            "(default '1' = try mx.compile inner decode; set '0' for eager-only)",
+            flush=True,
+        )
     yield
     if continuous and ctx.batch_worker_stop is not None:
         ctx.batch_worker_stop.set()
