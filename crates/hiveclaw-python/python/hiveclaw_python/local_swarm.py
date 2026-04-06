@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .init import find_repo_root, init
+from .init import init, resolve_manager_repo_root
 from .manager import HiveClawManager
 
 
@@ -26,6 +26,12 @@ class LocalSwarm:
     """
     Spawn ``hiveclaw_server`` (continuous batch + SSE) and run each registered agent
     as one ``/v1/chat/completions`` stream.
+
+    **Coordination model:** multi-agent state is exchanged through **256-D bf16 latents**
+    in the IOSurface slab (VRAM-backed); HTTP/SSE only carries user prompts and streamed
+    text — it is not zero-copy for every chat byte. Slot indices pick slab rows for
+    stigmergy; tune ``HIVECLAW_*`` env vars (see ``scripts/hiveclaw_server.py``) for
+    advanced batching and stigmergy behavior.
 
     Example::
 
@@ -47,15 +53,19 @@ class LocalSwarm:
         daemon_auto_start: bool = True,
         python_exe: str | None = None,
         build_if_missing: bool = False,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         self.model = model
         self.sae_path = sae_path
         self.default_alpha = float(alpha)
         self.port = int(port)
-        self.repo_root = Path(repo_root).resolve() if repo_root else find_repo_root()
+        self.repo_root = (
+            Path(repo_root).resolve() if repo_root else resolve_manager_repo_root(None)
+        )
         self.daemon_auto_start = bool(daemon_auto_start)
         self.python_exe = python_exe or sys.executable
         self.build_if_missing = bool(build_if_missing)
+        self.extra_env = dict(extra_env) if extra_env else {}
         self._agents: list[AgentConfig] = []
         self._manager: HiveClawManager | None = None
         self._server_proc: subprocess.Popen | None = None
@@ -90,7 +100,8 @@ class LocalSwarm:
         else:
             self._manager = HiveClawManager(self.repo_root, python_exe=self.python_exe)
 
-        env: dict[str, str] = {"HIVECLAW_MODEL_ID": self.model}
+        env: dict[str, str] = dict(self.extra_env)
+        env["HIVECLAW_MODEL_ID"] = self.model
         if self.sae_path is not None:
             env["HIVECLAW_SAE_PATH"] = str(Path(self.sae_path).resolve())
 

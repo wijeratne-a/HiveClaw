@@ -1,0 +1,52 @@
+# Build a macOS arm64 wheel (PyO3 extension + optional bundled pheromoned).
+# Artifact: hiveclaw-python-wheel-macos-arm64/*.whl
+name: Wheel macOS arm64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/hiveclaw-python/**"
+      - "crates/hiveclaw-daemon/**"
+      - "crates/hiveclaw-core/**"
+      - "crates/hiveclaw-backend-metal/**"
+      - ".github/workflows/wheel-macos-arm64.yml"
+
+jobs:
+  wheel:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install maturin
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "maturin>=1.5,<2"
+
+      - name: Build pheromoned (release)
+        run: cargo build --release -p hiveclaw-daemon
+
+      - name: Stage bundled pheromoned for wheel
+        run: |
+          mkdir -p crates/hiveclaw-python/python/hiveclaw_python/native/macos_arm64
+          cp target/release/pheromoned crates/hiveclaw-python/python/hiveclaw_python/native/macos_arm64/
+          chmod +x crates/hiveclaw-python/python/hiveclaw_python/native/macos_arm64/pheromoned
+
+      - name: Maturin build
+        working-directory: crates/hiveclaw-python
+        run: maturin build --release -o dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hiveclaw-python-wheel-macos-arm64
+          path: crates/hiveclaw-python/dist/*.whl

@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+from .daemon_paths import bundled_pheromoned_path, package_plist_template_path, render_plist_program
+
 
 def _launchctl_print(svc: str) -> tuple[int, str]:
     try:
@@ -46,11 +48,20 @@ class HiveClawManager:
         self.repo_root = Path(repo_root).resolve()
         self.python_exe = python_exe or sys.executable
         self.teardown = bool(teardown)
-        self._pheromoned = self.repo_root / "target" / "release" / "pheromoned"
+        self._pheromoned = self._resolve_pheromoned_binary()
         self._doctor = self.repo_root / "scripts" / "hiveclaw_doctor.py"
         self._plist_template = self.repo_root / "com.hiveclaw.pheromoned.plist.in"
         self._launch_agents = Path.home() / "Library" / "LaunchAgents"
         self._installed_plist = self._launch_agents / "com.hiveclaw.pheromoned.plist"
+
+    def _resolve_pheromoned_binary(self) -> Path:
+        dev = self.repo_root / "target" / "release" / "pheromoned"
+        if dev.is_file():
+            return dev
+        bundled = bundled_pheromoned_path()
+        if bundled is not None:
+            return bundled
+        return dev
 
     @property
     def gui_domain(self) -> str:
@@ -66,11 +77,18 @@ class HiveClawManager:
         return env
 
     def build_daemon_release(self) -> None:
+        if not (self.repo_root / "Cargo.toml").is_file():
+            raise RuntimeError(
+                "Cannot build pheromoned: no Cargo.toml at repo_root. "
+                "Use a full HiveClaw checkout, pass repo_root= to HiveClawManager, "
+                "or install a wheel that bundles native/macos_arm64/pheromoned."
+            )
         subprocess.run(
             ["cargo", "build", "--release", "-p", "hiveclaw-daemon"],
             cwd=str(self.repo_root),
             check=True,
         )
+        self._pheromoned = self._resolve_pheromoned_binary()
 
     def daemon_load(self) -> None:
         subprocess.run(
@@ -104,10 +122,15 @@ class HiveClawManager:
         return "state = running" in text
 
     def render_plist(self) -> str:
-        if not self._plist_template.is_file():
-            raise FileNotFoundError(self._plist_template)
-        template = self._plist_template.read_text(encoding="utf-8")
-        return template.replace("@PROGRAM@", str(self._pheromoned))
+        if self._plist_template.is_file():
+            template = self._plist_template.read_text(encoding="utf-8")
+            return template.replace("@PROGRAM@", str(self._pheromoned))
+        ptp = package_plist_template_path()
+        if ptp.is_file():
+            return render_plist_program(self._pheromoned)
+        raise FileNotFoundError(
+            f"Missing plist template: {self._plist_template} or {ptp}"
+        )
 
     def bootstrap(
         self,
@@ -126,12 +149,17 @@ class HiveClawManager:
                 return
 
         if build_if_missing and not self._pheromoned.is_file():
-            self.build_daemon_release()
+            try:
+                self.build_daemon_release()
+            except RuntimeError:
+                self._pheromoned = self._resolve_pheromoned_binary()
 
         if not self._pheromoned.is_file():
             raise RuntimeError(
                 f"Missing pheromoned binary: {self._pheromoned}. "
-                "Run build_daemon_release() or `cargo build --release -p hiveclaw-daemon`."
+                "From a checkout: `cargo build --release -p hiveclaw-daemon`. "
+                "For pip wheels on Apple Silicon, ensure the wheel includes "
+                "hiveclaw_python/native/macos_arm64/pheromoned (see native/macos_arm64/README.txt)."
             )
 
         self._launch_agents.mkdir(parents=True, exist_ok=True)
@@ -198,9 +226,14 @@ class HiveClawManager:
         """
         srv = self.repo_root / "scripts" / "hiveclaw_server.py"
         if not srv.is_file():
-            raise FileNotFoundError(srv)
+            raise FileNotFoundError(
+                f"{srv} not found. The chat server ships in the HiveClaw repo under scripts/. "
+                "Set repo_root to your checkout, or set HIVECLAW_REPO_ROOT and run "
+                "`hiveclaw-server` / `python -m hiveclaw_python.server_main`."
+            )
 
         child_env = os.environ.copy()
+        child_env["HIVECLAW_REPO_ROOT"] = str(self.repo_root)
         if continuous_batch:
             child_env["HIVECLAW_CONTINUOUS_BATCH"] = "1"
             child_env["HIVECLAW_COMPILE_WARMUP"] = "1"

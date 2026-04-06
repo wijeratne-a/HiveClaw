@@ -19,9 +19,10 @@ Multi-agent “committee” task (5 reviewers × 10 rounds) comparing:
 | Path | Coordination tokens | Content tokens (typical) | Context growth | How to reproduce |
 |------|----------------------|---------------------------|----------------|------------------|
 | **String-passing baseline** | High (prompts include full prior discussion) | Same order | Grows every round | `python scripts/benchmark_consensus.py --no-hiveclaw` |
+| **LangChain string baseline** | Same task/metrics as string baseline; prompts assembled via LangChain | Same order | Grows every round | `pip install -r scripts/requirements-bench-langchain.txt` then `python scripts/benchmark_external.py --no-hiveclaw` |
 | **HiveClaw latent path** | **0** (no text passed between agents) | Same order | ~constant | `python scripts/benchmark_consensus.py` (needs daemon + SAE) |
 
-Run [`scripts/benchmark_consensus.py`](scripts/benchmark_consensus.py) on your Mac and paste the printed table into docs or CI artifacts. Internal stigmergy A/B (server on vs off) remains in [`scripts/benchmark_stigmergy.py`](scripts/benchmark_stigmergy.py).
+Run [`scripts/benchmark_consensus.py`](scripts/benchmark_consensus.py) on your Mac and paste the printed table into docs or CI artifacts. For an external-framework baseline plus HiveClaw on the same task, run [`scripts/benchmark_external.py`](scripts/benchmark_external.py) (LangChain + optional HiveClaw; prints coordination **token tax**). Internal stigmergy A/B (server on vs off) remains in [`scripts/benchmark_stigmergy.py`](scripts/benchmark_stigmergy.py).
 
 ## Quick start (5-line style)
 
@@ -34,6 +35,10 @@ swarm.add_agent(slot=1, goal="Say hello in one sentence.")
 swarm.run()  # bootstraps daemon if needed, spawns hiveclaw_server, streams SSE
 swarm.stop()
 ```
+
+`LocalSwarm` coordinates agents through **slab latents** (not by shipping full chat logs over HTTP). Use `sae_path=...` for a custom SAE, or pass `extra_env={"HIVECLAW_SAE_PATH": "/path/to.safetensors", ...}` for any `HIVECLAW_*` server knob (`extra_env` is merged first; `model` / `sae_path` win for those two keys).
+
+**Pip / wheel:** macOS arm64 wheels can bundle `pheromoned` (see [`.github/workflows/wheel-macos-arm64.yml`](.github/workflows/wheel-macos-arm64.yml)). The FastAPI server still lives under `scripts/` in the repo — set `HIVECLAW_REPO_ROOT` or pass `repo_root=` so `spawn_server` / `hiveclaw-server` can find `scripts/hiveclaw_server.py`.
 
 Lower-level slab-only example: `python examples/hello_swarm.py --slab-only`. Full stack demo: `python examples/hello_swarm.py`.
 
@@ -71,7 +76,7 @@ Optional GitHub Actions workflow: [`.github/workflows/ironclad-burn-in.yml`](.gi
 ## Repository layout
 
 - **`crates/hiveclaw-daemon`** — `pheromoned` binary and XPC surface broker.
-- **`crates/hiveclaw-python`** — PyO3 + **`hiveclaw_python`** (SlabClient, `HiveClawManager`, `init`, `LocalSwarm`, `Swarm`).
+- **`crates/hiveclaw-python`** — PyO3 + **`hiveclaw_python`** (SlabClient, `HiveClawManager`, `init`, `LocalSwarm`, `Swarm`). Console script **`hiveclaw-server`** runs the server from a checkout (`HIVECLAW_REPO_ROOT` or auto-detected repo root).
 - **`scripts/`** — MLX spikes, [`hiveclaw_server.py`](scripts/hiveclaw_server.py) (OpenAI-compatible API + continuous batching), benchmarks, burn-in.
 
 ## Licensing

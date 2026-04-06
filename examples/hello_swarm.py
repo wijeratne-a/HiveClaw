@@ -32,6 +32,7 @@ def _run_local_swarm() -> int:
             model="mlx-community/Llama-3.2-1B-Instruct-4bit",
             port=8765,
             build_if_missing=False,
+            # Optional: sae_path="...", or extra_env={"HIVECLAW_SAE_PATH": "...", "HIVECLAW_STIGMERGY": "1"},
         )
         swarm.add_agent(
             slot=1,
