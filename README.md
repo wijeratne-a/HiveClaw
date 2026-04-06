@@ -24,6 +24,17 @@ Multi-agent “committee” task (5 reviewers × 10 rounds) comparing:
 
 Run [`scripts/benchmark_consensus.py`](scripts/benchmark_consensus.py) on your Mac and paste the printed table into docs or CI artifacts. For an external-framework baseline plus HiveClaw on the same task, run [`scripts/benchmark_external.py`](scripts/benchmark_external.py) (LangChain + optional HiveClaw; prints coordination **token tax**). Internal stigmergy A/B (server on vs off) remains in [`scripts/benchmark_stigmergy.py`](scripts/benchmark_stigmergy.py).
 
+### Example statistics (same task, one Apple Silicon run)
+
+Defaults: **5 agents × 10 rounds**, **`--tokens-per-turn 24`**, model **`mlx-community/Llama-3.2-1B-Instruct-4bit`**, command **`python scripts/benchmark_external.py`** (LangChain path then HiveClaw path). Figures vary by machine, thermal state, and run; reproduce locally.
+
+| Phase | `total_wall_ms` | `total_coord_tokens` | `total_content_tokens` | Token tax `coord / (coord + content)` |
+|-------|-----------------|------------------------|--------------------------|----------------------------------------|
+| LangChain string baseline | 175 586 (~175.6 s) | 38 095 | 1 098 | **0.972** |
+| HiveClaw latent path | 45 835 (~45.8 s) | 0 | 1 100 | **0.000** |
+
+**Wall-clock ratio (LangChain / HiveClaw):** **~3.83×** (175 586 ÷ 45 835). *Coordination token tax* on the LangChain side is **~97.2%** of (coord + content) tokens in this metric; HiveClaw reports **0** coordination tokens under the benchmark’s definition (slab coordination is not counted as chat tokens).
+
 ## Quick start (5-line style)
 
 From the repo root with venv active, `make python`, `pip install -r scripts/requirements-server.txt`, models + SAE present:
