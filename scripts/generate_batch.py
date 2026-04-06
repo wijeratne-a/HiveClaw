@@ -355,6 +355,8 @@ def release_entry_slab(slab_client: Any, e: ChatBatchEntry) -> None:
     if e.released:
         return
     e.released = True
+    if int(e.slot_id) < 0:
+        return
     try:
         slab_client.release_task(e.slot_id)
     except Exception:
@@ -484,6 +486,7 @@ def generate_batch_session(
     d_latent: int,
     entries: list[ChatBatchEntry],
     max_client_queue_depth: int = 50,
+    stigmergy_enabled: bool = True,
 ) -> None:
     """Run prefill + decode for a batch; mutates ``entries`` (evictions)."""
     if not entries:
@@ -516,6 +519,7 @@ def generate_batch_session(
         batch_slots=batch_slots,
         b_enc=b_enc,
         d_latent=int(d_latent),
+        enable_slab=stigmergy_enabled,
     )
     model.model.layers[-1] = steering
 
@@ -732,28 +736,31 @@ def batch_jobs_to_entries(ctx: Any, jobs: list[BatchedStreamJob]) -> list[ChatBa
             )
             push_done(job.loop, job.client_queue)
             continue
-        goal_np = srv._goal_latent(
-            ctx.model,
-            ctx.tokenizer,
-            goal_text.strip(),
-            ctx.original_layer,
-            ctx.W_enc,
-            ctx.b_enc,
-        )
-        slot = srv._claim_slot(ctx, goal_np)
-        if slot < 0:
-            push_openai_chunk(
-                job.loop,
-                job.client_queue,
-                {
-                    "error": {
-                        "message": "no slab slot available",
-                        "type": "RuntimeError",
-                    }
-                },
+        if getattr(ctx, "stigmergy_enabled", True):
+            goal_np = srv._goal_latent(
+                ctx.model,
+                ctx.tokenizer,
+                goal_text.strip(),
+                ctx.original_layer,
+                ctx.W_enc,
+                ctx.b_enc,
             )
-            push_done(job.loop, job.client_queue)
-            continue
+            slot = srv._claim_slot(ctx, goal_np)
+            if slot < 0:
+                push_openai_chunk(
+                    job.loop,
+                    job.client_queue,
+                    {
+                        "error": {
+                            "message": "no slab slot available",
+                            "type": "RuntimeError",
+                        }
+                    },
+                )
+                push_done(job.loop, job.client_queue)
+                continue
+        else:
+            slot = -1
         prompt_tokens = srv._encode_messages(ctx.tokenizer, msgs)
         cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
@@ -821,6 +828,7 @@ def swarm_batch_worker(
                 d_latent=int(ctx.d_latent),
                 entries=entries,
                 max_client_queue_depth=max_client_queue_depth,
+                stigmergy_enabled=bool(getattr(ctx, "stigmergy_enabled", True)),
             )
         except Exception as e:
             for ent in entries:

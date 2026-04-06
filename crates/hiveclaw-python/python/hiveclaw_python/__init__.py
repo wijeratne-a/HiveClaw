@@ -232,3 +232,7 @@ class SlabClient(_SlabClientBase):
         if depends is None:
             return self._slab_handle.inhibit(int(slot_index), aid)
         return self._slab_handle.inhibit(int(slot_index), aid, depends)
+
+
+from .manager import HiveClawManager
+from .swarm import Swarm

@@ -269,6 +269,7 @@ class BatchedSteeringWrapper(nn.Module):
         *,
         b_enc: mx.array | None = None,
         d_latent: int = 256,
+        enable_slab: bool = True,
     ):
         super().__init__()
         object.__setattr__(self, "layer", layer)
@@ -278,6 +279,7 @@ class BatchedSteeringWrapper(nn.Module):
         object.__setattr__(self, "b_enc", b_enc)
         object.__setattr__(self, "d_latent", int(d_latent))
         object.__setattr__(self, "alpha", float(alpha))
+        object.__setattr__(self, "enable_slab", bool(enable_slab))
         object.__setattr__(self, "current_batch_slots", batch_slots)
         object.__setattr__(self, "last_steered_h", None)
         bb = int(batch_slots.shape[0])
@@ -301,6 +303,7 @@ class BatchedSteeringWrapper(nn.Module):
             "b_enc",
             "d_latent",
             "alpha",
+            "enable_slab",
             "current_batch_slots",
             "last_steered_h",
             "last_steered_norm",
@@ -321,6 +324,22 @@ class BatchedSteeringWrapper(nn.Module):
             else self.current_batch_slots
         )
         out = self.layer(*args, **kwargs_fwd)
+        if not self.enable_slab:
+            h = out[0] if isinstance(out, tuple) else out
+            h_step = h[:, -1:, :]
+            object.__setattr__(self, "last_steered_h", h_step)
+            bb = int(h.shape[0])
+            object.__setattr__(
+                self,
+                "last_steered_norm",
+                mx.zeros((bb, 1, 1), dtype=mx.float32),
+            )
+            object.__setattr__(
+                self,
+                "last_steered_wst",
+                mx.zeros((1,), dtype=mx.uint32),
+            )
+            return out
         h = out[0] if isinstance(out, tuple) else out
         h_step = h[:, -1:, :]
         h_modified, norm, wst = apply_steering_sandwich(

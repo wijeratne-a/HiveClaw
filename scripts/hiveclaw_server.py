@@ -70,6 +70,12 @@ class ServerContext:
     batch_worker_stop: Any = None
     max_client_queue_depth: int = 50
     effective_max_batch: int = 8
+    stigmergy_enabled: bool = True
+
+
+def _stigmergy_from_env() -> bool:
+    v = os.environ.get("HIVECLAW_STIGMERGY", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
 
 
 def _config_hidden_size(config: dict) -> int:
@@ -189,8 +195,10 @@ def _sync_startup() -> ServerContext:
 
     original_layer = model.model.layers[-1]
     d_latent = slab_client.get_latent_dim()
+    stig = _stigmergy_from_env()
     print(
-        f"[hiveclaw_server] MLX + slab ready latent_dim={d_latent} model={MODEL_ID}",
+        f"[hiveclaw_server] MLX + slab ready latent_dim={d_latent} model={MODEL_ID} "
+        f"stigmergy={stig}",
         flush=True,
     )
     return ServerContext(
@@ -203,6 +211,7 @@ def _sync_startup() -> ServerContext:
         b_dec=b_dec,
         d_latent=d_latent,
         hf_config=hf_config,
+        stigmergy_enabled=stig,
     )
 
 
@@ -246,32 +255,37 @@ def _sync_chat_completion_unlocked(
     if not goal_text.strip():
         raise ValueError("no user/content text for goal latent")
 
-    goal_np = _goal_latent(
-        model, tokenizer, goal_text.strip(), ctx.original_layer, ctx.W_enc, ctx.b_enc
-    )
-    slot = _claim_slot(ctx, goal_np)
-    if slot < 0:
-        raise RuntimeError("no slab slot available")
-
-    alpha = float(body.alpha if body.alpha is not None else 0.1)
-    steering = ActiveSteeringWrapper(
-        ctx.original_layer,
-        ctx.slab_client,
-        ctx.W_enc,
-        ctx.b_dec,
-        alpha=alpha,
-        slot_index=slot,
-    )
-    model.model.layers[-1] = steering
-
     encoded = _encode_messages(tokenizer, msgs)
+    steering: ActiveSteeringWrapper | None = None
+    slot = -1
+    if ctx.stigmergy_enabled:
+        goal_np = _goal_latent(
+            model, tokenizer, goal_text.strip(), ctx.original_layer, ctx.W_enc, ctx.b_enc
+        )
+        slot = _claim_slot(ctx, goal_np)
+        if slot < 0:
+            raise RuntimeError("no slab slot available")
+        alpha = float(body.alpha if body.alpha is not None else 0.1)
+        steering = ActiveSteeringWrapper(
+            ctx.original_layer,
+            ctx.slab_client,
+            ctx.W_enc,
+            ctx.b_dec,
+            alpha=alpha,
+            slot_index=slot,
+        )
+        model.model.layers[-1] = steering
+    else:
+        model.model.layers[-1] = ctx.original_layer
+
     temp = float(body.temperature if body.temperature is not None else 0.8)
     sampler = make_sampler(temp=temp)
     eos_id = int(tokenizer.eos_token_id) if tokenizer.eos_token_id is not None else -1
 
     pieces: list[str] = []
     try:
-        object.__setattr__(steering, "current_slot", slot)
+        if steering is not None:
+            object.__setattr__(steering, "current_slot", slot)
         for token, _ in generate_step(
             encoded,
             model,
@@ -285,16 +299,17 @@ def _sync_chat_completion_unlocked(
     finally:
         model.model.layers[-1] = ctx.original_layer
 
-    last_h = steering.last_steered_h
-    if last_h is not None:
-        h_f = last_h.astype(mx.float32)
-        latent = mx.maximum(
-            mx.matmul(h_f, mx.transpose(ctx.W_enc)) + ctx.b_enc, 0.0
-        ).astype(mx.bfloat16)
-        latent = latent.reshape(1, 1, ctx.d_latent)
-        write_res = ctx.slab_client.write_slot_v5(slot, latent)
-        mx.eval(write_res)
-    ctx.slab_client.release_task(slot)
+    if steering is not None and slot >= 0:
+        last_h = steering.last_steered_h
+        if last_h is not None:
+            h_f = last_h.astype(mx.float32)
+            latent = mx.maximum(
+                mx.matmul(h_f, mx.transpose(ctx.W_enc)) + ctx.b_enc, 0.0
+            ).astype(mx.bfloat16)
+            latent = latent.reshape(1, 1, ctx.d_latent)
+            write_res = ctx.slab_client.write_slot_v5(slot, latent)
+            mx.eval(write_res)
+        ctx.slab_client.release_task(slot)
 
     content = "".join(pieces)
     cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -345,25 +360,29 @@ def _sync_stream_chunks_unlocked(
     if not goal_text.strip():
         raise ValueError("no user/content text for goal latent")
 
-    goal_np = _goal_latent(
-        model, tokenizer, goal_text.strip(), ctx.original_layer, ctx.W_enc, ctx.b_enc
-    )
-    slot = _claim_slot(ctx, goal_np)
-    if slot < 0:
-        raise RuntimeError("no slab slot available")
-
-    alpha = float(body.alpha if body.alpha is not None else 0.1)
-    steering = ActiveSteeringWrapper(
-        ctx.original_layer,
-        ctx.slab_client,
-        ctx.W_enc,
-        ctx.b_dec,
-        alpha=alpha,
-        slot_index=slot,
-    )
-    model.model.layers[-1] = steering
-
     encoded = _encode_messages(tokenizer, msgs)
+    steering: ActiveSteeringWrapper | None = None
+    slot = -1
+    if ctx.stigmergy_enabled:
+        goal_np = _goal_latent(
+            model, tokenizer, goal_text.strip(), ctx.original_layer, ctx.W_enc, ctx.b_enc
+        )
+        slot = _claim_slot(ctx, goal_np)
+        if slot < 0:
+            raise RuntimeError("no slab slot available")
+        alpha = float(body.alpha if body.alpha is not None else 0.1)
+        steering = ActiveSteeringWrapper(
+            ctx.original_layer,
+            ctx.slab_client,
+            ctx.W_enc,
+            ctx.b_dec,
+            alpha=alpha,
+            slot_index=slot,
+        )
+        model.model.layers[-1] = steering
+    else:
+        model.model.layers[-1] = ctx.original_layer
+
     temp = float(body.temperature if body.temperature is not None else 0.8)
     sampler = make_sampler(temp=temp)
     eos_id = int(tokenizer.eos_token_id) if tokenizer.eos_token_id is not None else -1
@@ -382,7 +401,8 @@ def _sync_stream_chunks_unlocked(
         }
 
     try:
-        object.__setattr__(steering, "current_slot", slot)
+        if steering is not None:
+            object.__setattr__(steering, "current_slot", slot)
         yield chunk({"role": "assistant", "content": ""})
         for token, _ in generate_step(
             encoded,
@@ -398,16 +418,17 @@ def _sync_stream_chunks_unlocked(
         yield chunk({}, finish="stop")
     finally:
         model.model.layers[-1] = ctx.original_layer
-        last_h = steering.last_steered_h
-        if last_h is not None:
-            h_f = last_h.astype(mx.float32)
-            latent = mx.maximum(
-                mx.matmul(h_f, mx.transpose(ctx.W_enc)) + ctx.b_enc, 0.0
-            ).astype(mx.bfloat16)
-            latent = latent.reshape(1, 1, ctx.d_latent)
-            write_res = ctx.slab_client.write_slot_v5(slot, latent)
-            mx.eval(write_res)
-        ctx.slab_client.release_task(slot)
+        if steering is not None and slot >= 0:
+            last_h = steering.last_steered_h
+            if last_h is not None:
+                h_f = last_h.astype(mx.float32)
+                latent = mx.maximum(
+                    mx.matmul(h_f, mx.transpose(ctx.W_enc)) + ctx.b_enc, 0.0
+                ).astype(mx.bfloat16)
+                latent = latent.reshape(1, 1, ctx.d_latent)
+                write_res = ctx.slab_client.write_slot_v5(slot, latent)
+                mx.eval(write_res)
+            ctx.slab_client.release_task(slot)
 
 
 @asynccontextmanager
@@ -485,7 +506,11 @@ app = FastAPI(title="HiveClaw Chat API", lifespan=lifespan)
 @app.get("/health")
 async def health(request: Request) -> dict[str, Any]:
     ctx: ServerContext = request.app.state.ctx
-    return {"status": "ok", "latent_dim": int(ctx.d_latent)}
+    return {
+        "status": "ok",
+        "latent_dim": int(ctx.d_latent),
+        "stigmergy": bool(ctx.stigmergy_enabled),
+    }
 
 
 @app.get("/v1/slots")
@@ -671,7 +696,15 @@ def main() -> None:
     p = argparse.ArgumentParser(description="HiveClaw OpenAI-compatible chat server (Phase 5)")
     p.add_argument("--host", type=str, default="127.0.0.1")
     p.add_argument("--port", type=int, default=8080)
+    p.add_argument(
+        "--no-stigmergy",
+        action="store_true",
+        help="Disable slab claim/read/write on the hot path (SlabClient still required). "
+        "Same as HIVECLAW_STIGMERGY=0.",
+    )
     args = p.parse_args()
+    if args.no_stigmergy:
+        os.environ["HIVECLAW_STIGMERGY"] = "0"
     import uvicorn
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
