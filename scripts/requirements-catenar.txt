@@ -1,0 +1,8 @@
+# Optional: Proof-of-Task receipts for hiveclaw_python.LocalSwarm (catenar_enabled=True).
+# Install from the Catenar repo (Python SDK lives under sdks/python):
+#
+#   pip install "catenar-sdk @ git+https://github.com/wijeratne-a/Catenar.git#subdirectory=sdks/python"
+#
+# Also install Catenar verifier/proxy per https://github.com/wijeratne-a/Catenar (docker compose).
+requests>=2.28.0
+pydantic>=2.7.0

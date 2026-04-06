@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+from .catenar_tracing import make_tracer
 from .init import init, resolve_manager_repo_root
 from .manager import HiveClawManager
 
@@ -33,6 +35,11 @@ class LocalSwarm:
     stigmergy; tune ``HIVECLAW_*`` env vars (see ``scripts/hiveclaw_server.py``) for
     advanced batching and stigmergy behavior.
 
+    Optional **Catenar** Proof-of-Task: set ``catenar_enabled=True`` and install the SDK
+    (see ``scripts/requirements-catenar.txt``). Each agent SSE turn emits one trace entry;
+    the verifier at ``catenar_url`` must be reachable for signed receipts (local WAL still
+    records traces if the network fails).
+
     Example::
 
         import hiveclaw_python as hc
@@ -54,6 +61,9 @@ class LocalSwarm:
         python_exe: str | None = None,
         build_if_missing: bool = False,
         extra_env: dict[str, str] | None = None,
+        catenar_enabled: bool = False,
+        catenar_url: str = "http://127.0.0.1:3000",
+        catenar_agent_id: Optional[str] = None,
     ) -> None:
         self.model = model
         self.sae_path = sae_path
@@ -66,9 +76,13 @@ class LocalSwarm:
         self.python_exe = python_exe or sys.executable
         self.build_if_missing = bool(build_if_missing)
         self.extra_env = dict(extra_env) if extra_env else {}
+        self.catenar_enabled = bool(catenar_enabled)
+        self.catenar_url = str(catenar_url)
+        self.catenar_agent_id = catenar_agent_id
         self._agents: list[AgentConfig] = []
         self._manager: HiveClawManager | None = None
         self._server_proc: subprocess.Popen | None = None
+        self._catenar_tracer: Any = None
 
     def add_agent(
         self,
@@ -113,6 +127,13 @@ class LocalSwarm:
             timeout_s=300.0,
         )
 
+        if self._catenar_tracer is None:
+            self._catenar_tracer = make_tracer(
+                self.catenar_enabled,
+                base_url=self.catenar_url,
+                agent_id=self.catenar_agent_id,
+            )
+
     def run(
         self,
         *,
@@ -135,6 +156,7 @@ class LocalSwarm:
             ) from e
 
         default_name = "hiveclaw-llama-1b"
+        tracer = self._catenar_tracer
         with httpx.Client(timeout=timeout_per_agent_s) as client:
             for ag in self._agents:
                 body = {
@@ -146,6 +168,7 @@ class LocalSwarm:
                     "alpha": ag.alpha,
                 }
                 pieces: list[str] = []
+                t0 = time.perf_counter()
                 with client.stream(
                     "POST",
                     f"{base}/v1/chat/completions",
@@ -173,11 +196,39 @@ class LocalSwarm:
                                     print(c, end="", flush=True)
                 if stream_output:
                     print()
-                out_texts.append("".join(pieces))
+                latency_ms = (time.perf_counter() - t0) * 1000.0
+                text = "".join(pieces)
+                tracer.append_trace_entry(
+                    {
+                        "action": "agent_turn",
+                        "target": f"hiveclaw://slot/{ag.slot}",
+                        "amount": None,
+                        "table": None,
+                        "details": {
+                            "slot": ag.slot,
+                            "goal": ag.goal[:200],
+                            "tokens_streamed": len(pieces),
+                            "latency_ms": round(latency_ms, 3),
+                            "model": self.model,
+                        },
+                        "reasoning_summary": ag.goal[:80],
+                        "model_id": self.model,
+                        "instruction_hash": None,
+                        "parent_task_id": None,
+                    }
+                )
+                out_texts.append(text)
 
+        tracer.wait_for_results(len(self._agents), timeout_s=30.0)
         return out_texts
 
     def stop(self) -> None:
+        if self._catenar_tracer is not None:
+            try:
+                self._catenar_tracer.close()
+            except Exception:
+                pass
+            self._catenar_tracer = None
         if self._server_proc is not None:
             self._server_proc.terminate()
             try:

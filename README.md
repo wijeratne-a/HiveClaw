@@ -14,6 +14,21 @@
 
 ## Benchmark: coordination without a token tax
 
+> **Sample run (Apple Silicon, Llama 3.2 1B, 5 agents × 10 rounds, 24 tok/turn):** LangChain string baseline — **~97.2%** token tax (`coord / (coord + content)`), **~175.6 s** wall time. HiveClaw latent path — **0%** token tax in this metric, **~45.8 s** wall time (**~3.83×** faster in this harness). **Reproduce:** `python scripts/benchmark_external.py` (see measured table below).
+
+This harness is a **synthetic committee task**; slab / XPC / SAE work is **not** counted as chat tokens. Numbers vary with machine, thermals, and model.
+
+### Example measured run (hardware-qualified)
+
+| Phase | Hardware | `total_wall_ms` | `total_coord_tokens` | `total_content_tokens` | Token tax `coord / (coord + content)` |
+|-------|----------|-----------------|------------------------|--------------------------|----------------------------------------|
+| LangChain string baseline | MacBook Air (Apple Silicon), macOS, Apr 2026 | 175 586 (~175.6 s) | 38 095 | 1 098 | **0.972** |
+| HiveClaw latent path | same | 45 835 (~45.8 s) | 0 | 1 100 | **0.000** |
+
+Command: **`python scripts/benchmark_external.py`** after `pip install -r scripts/requirements-bench-langchain.txt` and server deps; LangChain phase then HiveClaw phase, defaults above.
+
+**Wall-clock ratio (LangChain / HiveClaw):** **~3.83×** (175 586 ÷ 45 835). *Coordination token tax* on the LangChain side is **~97.2%** of (coord + content) tokens in this metric; HiveClaw reports **0** coordination tokens under the benchmark’s definition (slab coordination is not counted as chat tokens).
+
 Multi-agent “committee” task (5 reviewers × 10 rounds) comparing:
 
 | Path | Coordination tokens | Content tokens (typical) | Context growth | How to reproduce |
@@ -23,17 +38,6 @@ Multi-agent “committee” task (5 reviewers × 10 rounds) comparing:
 | **HiveClaw latent path** | **0** (no text passed between agents) | Same order | ~constant | `python scripts/benchmark_consensus.py` (needs daemon + SAE) |
 
 Run [`scripts/benchmark_consensus.py`](scripts/benchmark_consensus.py) on your Mac and paste the printed table into docs or CI artifacts. For an external-framework baseline plus HiveClaw on the same task, run [`scripts/benchmark_external.py`](scripts/benchmark_external.py) (LangChain + optional HiveClaw; prints coordination **token tax**). Internal stigmergy A/B (server on vs off) remains in [`scripts/benchmark_stigmergy.py`](scripts/benchmark_stigmergy.py).
-
-### Example statistics (same task, one Apple Silicon run)
-
-Defaults: **5 agents × 10 rounds**, **`--tokens-per-turn 24`**, model **`mlx-community/Llama-3.2-1B-Instruct-4bit`**, command **`python scripts/benchmark_external.py`** (LangChain path then HiveClaw path). Figures vary by machine, thermal state, and run; reproduce locally.
-
-| Phase | `total_wall_ms` | `total_coord_tokens` | `total_content_tokens` | Token tax `coord / (coord + content)` |
-|-------|-----------------|------------------------|--------------------------|----------------------------------------|
-| LangChain string baseline | 175 586 (~175.6 s) | 38 095 | 1 098 | **0.972** |
-| HiveClaw latent path | 45 835 (~45.8 s) | 0 | 1 100 | **0.000** |
-
-**Wall-clock ratio (LangChain / HiveClaw):** **~3.83×** (175 586 ÷ 45 835). *Coordination token tax* on the LangChain side is **~97.2%** of (coord + content) tokens in this metric; HiveClaw reports **0** coordination tokens under the benchmark’s definition (slab coordination is not counted as chat tokens).
 
 ## Quick start (5-line style)
 
@@ -51,7 +55,7 @@ swarm.stop()
 
 **Pip / wheel:** macOS arm64 wheels can bundle `pheromoned` (see [`.github/workflows/wheel-macos-arm64.yml`](.github/workflows/wheel-macos-arm64.yml)). The FastAPI server still lives under `scripts/` in the repo — set `HIVECLAW_REPO_ROOT` or pass `repo_root=` so `spawn_server` / `hiveclaw-server` can find `scripts/hiveclaw_server.py`.
 
-Lower-level slab-only example: `python examples/hello_swarm.py --slab-only`. Full stack demo: `python examples/hello_swarm.py`.
+Lower-level slab-only example: `python examples/hello_swarm.py --slab-only`. Full stack demo: `python examples/hello_swarm.py`. Stigmergy overseer demo (frozen slot → `inhibit` → agent reroute, no LLM): `python scripts/overseer_demo.py`. **Catenar PoT** with `LocalSwarm`: install [`scripts/requirements-catenar.txt`](scripts/requirements-catenar.txt), run [`examples/local_swarm_catenar.py`](examples/local_swarm_catenar.py) with the verifier up ([Catenar](https://github.com/wijeratne-a/Catenar)).
 
 One-shot daemon bootstrap from Python:
 

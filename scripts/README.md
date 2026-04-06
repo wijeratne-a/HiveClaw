@@ -222,6 +222,8 @@ python scripts/overseer.py
 
 Each `swarm_spike.py` instance races to claim slab slots, runs synthetic matmul FLOPs while holding the lock, then blends slot scent toward a random goal. `overseer.py` inhibits any slot whose geometry freezes (mean per-dimension variance &lt; 1e-5 over the last 5 ticks).
 
+**Single-terminal demo:** `python scripts/overseer_demo.py` — two synthetic agent threads (fixed slots) plus an overseer thread; prints `INHIBIT` → `REROUTE` lifecycle to stdout (no LLM, no extra terminals).
+
 ## LLM swarm integration (`scripts/llm_swarm.py`)
 
 Multi-process test: **real** `mlx_lm` generation (default **`mlx-community/Llama-3.2-1B-Instruct-4bit`**) plus slab **sense → claim → generate (≤10 tokens) → write post-steer scent → release**. Each agent uses a **static goal vector** from a one-time prefill on its initial prompt; cosine pressure ranks unclaimed slots. **`--alpha`** tunes steering (default `0.1`). On EOS before 10 tokens, the agent picks a new prompt from a built-in pool.
