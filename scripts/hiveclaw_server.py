@@ -35,8 +35,17 @@ from mlx_lm.sample_utils import make_sampler
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-MODEL_ID = "mlx-community/Llama-3.2-1B-Instruct-4bit"
-SAE_PATH = Path(__file__).resolve().parent.parent / "models/hiveclaw_sae_v1.safetensors"
+MODEL_ID = os.environ.get(
+    "HIVECLAW_MODEL_ID", "mlx-community/Llama-3.2-1B-Instruct-4bit"
+)
+SAE_PATH = Path(
+    os.environ.get(
+        "HIVECLAW_SAE_PATH",
+        str(
+            Path(__file__).resolve().parent.parent / "models/hiveclaw_sae_v1.safetensors"
+        ),
+    )
+)
 MAX_CONCURRENT = 1
 MAX_CANDIDATE_SLOTS = 512
 DEFAULT_MODEL_NAME = "hiveclaw-llama-1b"

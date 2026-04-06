@@ -234,5 +234,7 @@ class SlabClient(_SlabClientBase):
         return self._slab_handle.inhibit(int(slot_index), aid, depends)
 
 
+from .init import find_repo_root, init
+from .local_swarm import AgentConfig, LocalSwarm
 from .manager import HiveClawManager
 from .swarm import Swarm

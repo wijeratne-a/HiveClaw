@@ -1,32 +1,74 @@
 #!/usr/bin/env python3
 """
-Minimal HiveClaw slab handshake: claim a slot, write/read v5 latent, release.
+HiveClaw quickstarts: high-level :class:`LocalSwarm` (daemon + server + SSE) or low-level slab.
 
-Requires: ``pheromoned`` under launchd and ``make python`` (see ``scripts/README.md``).
+**Primary (5-line style):** ``LocalSwarm`` bootstraps ``pheromoned`` and spawns ``hiveclaw_server``.
+
+**Low-level:** raw :class:`Swarm` / ``SlabClient`` round-trip (no HTTP).
+
+Requires: macOS + Apple Silicon, ``make python``, models + SAE as in ``scripts/README.md``.
+For ``LocalSwarm``: ``pip install -r scripts/requirements-server.txt`` (httpx, mlx-lm, FastAPI stack).
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 
 import mlx.core as mx
 import numpy as np
 
-from hiveclaw_python import Swarm
 
-_FATAL = (
-    "pheromoned is not running under launchd, or XPC handshake failed.",
-    "From repo root:  cargo build --release -p hiveclaw-daemon && make daemon-load",
-    "Then:  make python",
-    "See scripts/README.md.",
-)
+def _run_local_swarm() -> int:
+    try:
+        import hiveclaw_python as hc
+    except ImportError as e:
+        print("hiveclaw_python not importable:", e, file=sys.stderr)
+        print("Run from repo venv after: make python", file=sys.stderr)
+        return 1
+
+    try:
+        swarm = hc.LocalSwarm(
+            model="mlx-community/Llama-3.2-1B-Instruct-4bit",
+            port=8765,
+            build_if_missing=False,
+        )
+        swarm.add_agent(
+            slot=1,
+            goal="Say hello in one short sentence.",
+            max_tokens=32,
+        )
+        swarm.run(stream_output=True)
+        swarm.stop()
+    except Exception as e:
+        print(f"[hello_swarm] LocalSwarm failed: {e}", file=sys.stderr)
+        print(
+            "Ensure daemon can load (try: hiveclaw_python.init() or make daemon-load) "
+            "and server deps are installed.",
+            file=sys.stderr,
+        )
+        return 1
+    print("\n[hello_swarm] LocalSwarm: OK")
+    return 0
 
 
-def main() -> int:
+def _run_slab_only() -> int:
+    try:
+        from hiveclaw_python import Swarm
+    except ImportError as e:
+        print("hiveclaw_python not importable:", e, file=sys.stderr)
+        return 1
+
+    _fatal = (
+        "pheromoned is not running under launchd, or XPC handshake failed.",
+        "From repo root:  cargo build --release -p hiveclaw-daemon && make daemon-load",
+        "Then:  make python",
+        "See scripts/README.md.",
+    )
     try:
         swarm = Swarm()
     except Exception:
-        print("\n".join(_FATAL), file=sys.stderr)
+        print("\n".join(_fatal), file=sys.stderr)
         return 1
 
     slot = swarm.try_claim_any()
@@ -50,8 +92,21 @@ def main() -> int:
             )
         )
     )
-    print(f"hello_swarm: OK slot={slot} latent_dim={d} max_abs_err={err:.6g}")
+    print(f"[hello_swarm] Slab-only: OK slot={slot} latent_dim={d} max_abs_err={err:.6g}")
     return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="HiveClaw hello examples")
+    p.add_argument(
+        "--slab-only",
+        action="store_true",
+        help="Only test SlabClient claim/write/read (no HTTP server)",
+    )
+    args = p.parse_args()
+    if args.slab_only:
+        return _run_slab_only()
+    return _run_local_swarm()
 
 
 if __name__ == "__main__":
