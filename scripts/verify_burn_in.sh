@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# Step A: Verification burn-in — concurrent SSE load + zero eager_fallback in server log.
+# Full Ironclad verification: SSE burn-in + burn_in.py criteria + zero eager_fallback.
+#
+# Defaults (override with env):
+#   HIVECLAW_MAX_QUEUE_DEPTH=10  — force 503 admission control under load (vs 50 clients)
+#   CONCURRENCY=50
+#   SWAPIN_DELTA_MAX=500000      — realistic macOS unified-memory paging budget for MLX load
+#
+# Exit 0 only if: (1) 0 eager_fallback in server log, (2) burn_in exits 0 (503 + swap + HTTP checks).
 #
 # Usage (from repo root):
 #   ./scripts/verify_burn_in.sh
-#   PORT=8766 CONCURRENCY=50 ./scripts/verify_burn_in.sh
-#   PYTHON=/path/to/python3 ./scripts/verify_burn_in.sh
+#   PORT=8766 CONCURRENCY=60 ./scripts/verify_burn_in.sh
+#   HIVECLAW_MAX_QUEUE_DEPTH=5 SWAPIN_DELTA_MAX=1000000 ./scripts/verify_burn_in.sh
 #
 # Requires: daemon loaded (make doctor), venv with mlx + httpx, models as for hiveclaw_server.
 set -euo pipefail
@@ -14,6 +21,7 @@ cd "$REPO_ROOT"
 
 PORT="${PORT:-8080}"
 CONCURRENCY="${CONCURRENCY:-50}"
+SWAPIN_DELTA_MAX="${SWAPIN_DELTA_MAX:-500000}"
 LOG="${VERIFY_LOG:-${TMPDIR:-/tmp}/hiveclaw_verify_$$.log}"
 
 if [[ -x "${REPO_ROOT}/.venv/bin/python3" ]]; then
@@ -25,6 +33,7 @@ fi
 export HIVECLAW_CONTINUOUS_BATCH=1
 export HIVECLAW_COMPILE_DECODE=1
 export HIVECLAW_COMPILE_WARMUP=1
+export HIVECLAW_MAX_QUEUE_DEPTH="${HIVECLAW_MAX_QUEUE_DEPTH:-10}"
 
 SERVER_PID=""
 cleanup() {
@@ -39,7 +48,7 @@ echo "[verify_burn_in] log: ${LOG}"
 rm -f "${LOG}"
 touch "${LOG}"
 
-echo "[verify_burn_in] starting server on 127.0.0.1:${PORT} ..."
+echo "[verify_burn_in] starting server on 127.0.0.1:${PORT} (max_queue_depth=${HIVECLAW_MAX_QUEUE_DEPTH}) ..."
 "${PYTHON}" scripts/hiveclaw_server.py --host 127.0.0.1 --port "${PORT}" >>"${LOG}" 2>&1 &
 SERVER_PID=$!
 
@@ -58,12 +67,13 @@ if ! curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[verify_burn_in] running burn_in (concurrency=${CONCURRENCY}) ..."
+echo "[verify_burn_in] running burn_in (concurrency=${CONCURRENCY}, swapin-delta-max=${SWAPIN_DELTA_MAX}) ..."
 set +e
 "${PYTHON}" scripts/burn_in.py \
   --base-url "http://127.0.0.1:${PORT}" \
   --concurrency "${CONCURRENCY}" \
-  --stderr-file "${LOG}"
+  --stderr-file "${LOG}" \
+  --swapin-delta-max "${SWAPIN_DELTA_MAX}"
 BURN_EXIT=$?
 set -e
 
@@ -103,8 +113,10 @@ if [[ "${EAGER}" -ne 0 ]]; then
   exit 1
 fi
 
-echo "[verify_burn_in] PASS Step A: 0 eager_fallback in stderr log."
+echo "[verify_burn_in] PASS: 0 eager_fallback in server log."
 if [[ "${BURN_EXIT}" -ne 0 ]]; then
-  echo "[verify_burn_in] note: burn_in exited ${BURN_EXIT} (503/swap or other criteria); Step A metric still satisfied." >&2
+  echo "[verify_burn_in] FAIL: burn_in exited ${BURN_EXIT} (need 503 under load, swap delta, and HTTP checks)." >&2
+  exit "${BURN_EXIT}"
 fi
+echo "[verify_burn_in] PASS: burn_in full criteria (exit 0)."
 exit 0

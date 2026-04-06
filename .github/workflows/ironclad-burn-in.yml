@@ -1,0 +1,44 @@
+# Manual Ironclad burn-in (SSE + zero eager_fallback + burn_in exit criteria).
+#
+# Best-effort on GitHub-hosted macos-14: launchctl GUI domain, first-time MLX model
+# download, and Metal memory can fail or time out. Prefer a self-hosted Mac runner
+# with daemon already validated (make doctor) and models cached.
+#
+# Trigger: Actions -> Ironclad burn-in -> Run workflow
+name: Ironclad burn-in
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ironclad:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create venv and Python deps
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r scripts/requirements-spike.txt
+          .venv/bin/python -m pip install -r scripts/requirements-server.txt
+
+      - name: make python (native extensions)
+        run: make python PYTHON="${{ github.workspace }}/.venv/bin/python3"
+
+      - name: Build and load daemon
+        run: make daemon-load PYTHON="${{ github.workspace }}/.venv/bin/python3"
+
+      - name: Ironclad verify (doctor + verify_burn_in)
+        env:
+          PYTHON: ${{ github.workspace }}/.venv/bin/python3
+        run: bash scripts/ci_ironclad_verify.sh
