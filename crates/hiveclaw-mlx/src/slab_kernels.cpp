@@ -23,8 +23,17 @@ using mlx::core::Device;
 using mlx::core::Primitive;
 using mlx::core::zeros_like;
 
-ClaimSlabTask::ClaimSlabTask(MTL::Buffer* slab, uint32_t agent_id, Stream s)
-    : UnaryPrimitive(s), slab_buf_(slab), agent_id_(agent_id) {}
+ClaimSlabTask::ClaimSlabTask(
+    MTL::Buffer* slab,
+    uint32_t agent_id,
+    uint32_t stride,
+    uint32_t n_slots,
+    Stream s)
+    : UnaryPrimitive(s),
+      slab_buf_(slab),
+      agent_id_(agent_id),
+      stride_(stride),
+      n_slots_(n_slots) {}
 
 std::vector<Shape> ClaimSlabTask::output_shapes(
     const std::vector<array>& inputs) {
@@ -47,16 +56,18 @@ void ClaimSlabTask::eval_cpu(const std::vector<array>& inputs, array& out) {
     const uint32_t desired = hclw_pack_claimed(agent_id_ & 0xFFFFu);
     for (size_t i = 0; i < k; i++) {
         int s = c[i];
-        if (s < 0 || s >= static_cast<int>(HCLW_N_SLOTS)) {
+        if (s < 0 || s >= static_cast<int>(n_slots_)) {
             continue;
         }
-        size_t off = slot_base(static_cast<size_t>(s)) + OFF_S_CLAIM_FLAG;
+        size_t off =
+            hclw_slot_base(static_cast<size_t>(s), stride_) + OFF_S_CLAIM_FLAG;
         auto* state = reinterpret_cast<std::atomic<uint32_t>*>(base + off);
         uint32_t expected = 0;
         if (state->compare_exchange_strong(
                 expected, desired, std::memory_order_acq_rel, std::memory_order_relaxed)) {
             *reinterpret_cast<uint64_t*>(
-                base + slot_base(static_cast<size_t>(s)) + OFF_S_LAST_CLAIM_MACH) =
+                base + hclw_slot_base(static_cast<size_t>(s), stride_) +
+                OFF_S_LAST_CLAIM_MACH) =
                 mach_absolute_time();
             po[0] = s;
             return;
@@ -102,11 +113,15 @@ std::pair<std::vector<array>, std::vector<int>> ClaimSlabTask::vmap(
 InhibitSlab::InhibitSlab(MTL::Buffer* slab,
                          uint32_t slot_index,
                          uint32_t agent_id,
+                         uint32_t stride,
+                         uint32_t n_slots,
                          Stream s)
     : Primitive(s),
       slab_buf_(slab),
       slot_index_(slot_index),
-      agent_id_(agent_id) {}
+      agent_id_(agent_id),
+      stride_(stride),
+      n_slots_(n_slots) {}
 
 std::vector<Shape> InhibitSlab::output_shapes(
     const std::vector<array>& inputs) {
@@ -117,12 +132,12 @@ std::vector<Shape> InhibitSlab::output_shapes(
 void InhibitSlab::eval_cpu(const std::vector<array>& inputs,
                            std::vector<array>& outputs) {
     (void)inputs;
-    if (slot_index_ >= HCLW_N_SLOTS) {
+    if (slot_index_ >= n_slots_) {
         throw std::runtime_error("InhibitSlab: slot_index out of range");
     }
     char* base = static_cast<char*>(slab_buf_->contents());
-    size_t sb = slot_base(slot_index_);
-    std::memset(base + sb, 0, HCLW_SLOT_STRIDE);
+    size_t sb = hclw_slot_base(slot_index_, stride_);
+    std::memset(base + sb, 0, static_cast<size_t>(stride_));
     reinterpret_cast<std::atomic<uint32_t>*>(base + sb + OFF_S_CLAIM_FLAG)
         ->store(HCLW_SLOT_STATUS_INHIBITED, std::memory_order_release);
 
@@ -175,8 +190,8 @@ array SlabHandle::claim(array candidate_indices,
                         uint32_t agent_id,
                         std::optional<array> dep) {
     Stream s = default_stream(Device::cpu);
-    auto prim =
-        std::make_shared<ClaimSlabTask>(slab_buf_, agent_id, s);
+    auto prim = std::make_shared<ClaimSlabTask>(
+        slab_buf_, agent_id, stride_, n_slots_, s);
     std::vector<array> inputs = {std::move(candidate_indices)};
     array out(Shape{},
               mlx::core::int32,
@@ -195,7 +210,8 @@ array SlabHandle::inhibit(uint32_t slot_index,
     if (dep && (*dep).has_primitive()) {
         s = (*dep).primitive().stream();
     }
-    auto prim = std::make_shared<InhibitSlab>(slab_buf_, slot_index, agent_id, s);
+    auto prim = std::make_shared<InhibitSlab>(
+        slab_buf_, slot_index, agent_id, stride_, n_slots_, s);
     std::vector<array> inputs;
     if (dep) {
         inputs.push_back(*dep);
@@ -207,11 +223,11 @@ array SlabHandle::inhibit(uint32_t slot_index,
 }
 
 void SlabHandle::release_slot(uint32_t slot_index) {
-    if (slot_index >= HCLW_N_SLOTS) {
+    if (slot_index >= n_slots_) {
         throw std::runtime_error("release_slot: slot_index out of range");
     }
     char* base = static_cast<char*>(slab_buf_->contents());
-    size_t off = slot_base(slot_index) + OFF_S_CLAIM_FLAG;
+    size_t off = hclw_slot_base(slot_index, stride_) + OFF_S_CLAIM_FLAG;
     auto* st = reinterpret_cast<std::atomic<uint32_t>*>(base + off);
     st->store(0u, std::memory_order_release);
 }
@@ -219,9 +235,9 @@ void SlabHandle::release_slot(uint32_t slot_index) {
 std::vector<std::pair<bool, uint32_t>> SlabHandle::get_slot_states() const {
     char* base = static_cast<char*>(slab_buf_->contents());
     std::vector<std::pair<bool, uint32_t>> out;
-    out.reserve(HCLW_N_SLOTS);
-    for (size_t i = 0; i < HCLW_N_SLOTS; ++i) {
-        size_t b = slot_base(i);
+    out.reserve(n_slots_);
+    for (size_t i = 0; i < static_cast<size_t>(n_slots_); ++i) {
+        size_t b = hclw_slot_base(i, stride_);
         auto* st = reinterpret_cast<std::atomic<uint32_t>*>(base + b + OFF_S_CLAIM_FLAG);
         uint32_t w = st->load(std::memory_order_relaxed);
         bool claimed = (hclw_slot_status(w) == HCLW_SLOT_STATUS_CLAIMED);

@@ -3,8 +3,9 @@
 use block2::{Block, RcBlock};
 use hiveclaw_backend_metal::MetalPheromoneBuffer;
 use hiveclaw_core::math::{
-    layout_magic_version_u64, N_SLOTS, OFF_G_DECAY_RATE, OFF_G_MAGIC_V5, OFF_G_N_SLOTS_V5,
-    OFF_G_STRIDE_V5, OFF_G_VERSION_V5, OFF_G_ZETA_T, PHASE_C_BYTES, SLAB_SIZE, SLAB_VERSION_V5,
+    layout_magic_version_u64, OFF_G_DECAY_RATE, OFF_G_LATENT_ELEMS, OFF_G_MAGIC_V5,
+    OFF_G_N_SLOTS_V5, OFF_G_STRIDE_V5, OFF_G_VERSION_V5, OFF_G_ZETA_T, SlabLayout,
+    SLAB_VERSION_V6,
 };
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
@@ -179,9 +180,9 @@ pub fn validate_mapped_global_header_v5(base: *const u8) -> Result<(), String> {
             layout_magic_version_u64()
         ));
     }
-    if ver != SLAB_VERSION_V5 {
+    if ver != SLAB_VERSION_V6 {
         return Err(format!(
-            "global header version mismatch: got {ver}, expected {SLAB_VERSION_V5}"
+            "global header version mismatch: got {ver}, expected {SLAB_VERSION_V6}"
         ));
     }
     Ok(())
@@ -189,29 +190,26 @@ pub fn validate_mapped_global_header_v5(base: *const u8) -> Result<(), String> {
 
 /// Daemon entry: IOSurface slab + XPC listener (never returns).
 /// Writes Phase C global header after the slab has been zeroed.
-unsafe fn initialize_global_header(base: *mut u8, decay_rate: f32) {
+unsafe fn initialize_global_header(base: *mut u8, layout: &SlabLayout, decay_rate: f32) {
     let p = base;
     (p.add(OFF_G_MAGIC_V5) as *mut u64).write_unaligned(layout_magic_version_u64());
-    (p.add(OFF_G_VERSION_V5) as *mut u32).write_unaligned(SLAB_VERSION_V5);
-    (p.add(OFF_G_N_SLOTS_V5) as *mut u32).write_unaligned(N_SLOTS as u32);
-    (p.add(OFF_G_STRIDE_V5) as *mut u32).write_unaligned(hiveclaw_core::math::SLOT_STRIDE as u32);
+    (p.add(OFF_G_VERSION_V5) as *mut u32).write_unaligned(SLAB_VERSION_V6);
+    (p.add(OFF_G_N_SLOTS_V5) as *mut u32).write_unaligned(layout.n_slots);
+    (p.add(OFF_G_STRIDE_V5) as *mut u32).write_unaligned(layout.stride);
+    (p.add(OFF_G_LATENT_ELEMS) as *mut u32).write_unaligned(layout.latent_elems);
     (p.add(OFF_G_ZETA_T) as *mut f32).write_volatile(0.0);
     (p.add(OFF_G_DECAY_RATE) as *mut f32).write_volatile(decay_rate);
 }
 
-pub fn run_pheromoned_daemon() -> ! {
-    assert!(
-        PHASE_C_BYTES <= SLAB_SIZE,
-        "Phase C slab exceeds IOSurface allocation: {PHASE_C_BYTES} > {SLAB_SIZE}"
-    );
-
-    let slab = MetalPheromoneBuffer::new();
+pub fn run_pheromoned_daemon(layout: SlabLayout) -> ! {
+    let iosz = layout.iosurface_bytes;
+    let slab = MetalPheromoneBuffer::new_with_layout(&layout);
     let base = slab.base_ptr();
     unsafe {
-        ptr::write_bytes(base, 0, SLAB_SIZE);
+        ptr::write_bytes(base, 0, iosz);
         let decay_rate = 0.05_f32;
-        initialize_global_header(base, decay_rate);
-        crate::decay::start_decay_loop(base, 100);
+        initialize_global_header(base, &layout, decay_rate);
+        crate::decay::start_decay_loop(base, 100, layout);
     }
     let surface_id = slab.surface_id();
     let _slab = Box::leak(Box::new(slab));

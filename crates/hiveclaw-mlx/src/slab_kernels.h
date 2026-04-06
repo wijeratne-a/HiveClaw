@@ -13,7 +13,11 @@
 /// Try to claim the first free slot among `candidates` (int32). Returns scalar int32: slot index or -1.
 class ClaimSlabTask : public mlx::core::UnaryPrimitive {
    public:
-    ClaimSlabTask(MTL::Buffer* slab, uint32_t agent_id, mlx::core::Stream s);
+    ClaimSlabTask(MTL::Buffer* slab,
+                  uint32_t agent_id,
+                  uint32_t stride,
+                  uint32_t n_slots,
+                  mlx::core::Stream s);
     void eval_cpu(const std::vector<mlx::core::array>& inputs,
                   mlx::core::array& out) override;
     void eval_gpu(const std::vector<mlx::core::array>& inputs,
@@ -37,6 +41,8 @@ class ClaimSlabTask : public mlx::core::UnaryPrimitive {
    private:
     MTL::Buffer* slab_buf_;
     uint32_t agent_id_;
+    uint32_t stride_{0};
+    uint32_t n_slots_{0};
 };
 
 /// v5: memsets full slot stride for the target slot and marks it INHIBITED (overseer / fault path).
@@ -45,6 +51,8 @@ class InhibitSlab : public mlx::core::Primitive {
     InhibitSlab(MTL::Buffer* slab,
                 uint32_t slot_index,
                 uint32_t agent_id,
+                uint32_t stride,
+                uint32_t n_slots,
                 mlx::core::Stream s);
     void eval_cpu(const std::vector<mlx::core::array>& inputs,
                   std::vector<mlx::core::array>& outputs) override;
@@ -70,4 +78,6 @@ class InhibitSlab : public mlx::core::Primitive {
     MTL::Buffer* slab_buf_;
     uint32_t slot_index_;
     uint32_t agent_id_;
+    uint32_t stride_{0};
+    uint32_t n_slots_{0};
 };

@@ -3,7 +3,7 @@
 
 #include "slab_bridge.h"
 
-void* create_slab_buffer(void* mlx_mtl_device_ptr, uint32_t surface_id, size_t slab_size) {
+void* create_slab_buffer(void* mlx_mtl_device_ptr, uint32_t surface_id) {
     id<MTLDevice> device = (__bridge id<MTLDevice>)mlx_mtl_device_ptr;
     IOSurfaceRef surf = IOSurfaceLookup(surface_id);
     if (!surf) {
@@ -16,6 +16,7 @@ void* create_slab_buffer(void* mlx_mtl_device_ptr, uint32_t surface_id, size_t s
         CFRelease(surf);
         return nullptr;
     }
+    NSUInteger slab_size = IOSurfaceGetAllocSize(surf);
     id<MTLBuffer> buf = [device
         newBufferWithBytesNoCopy:base
                             length:slab_size

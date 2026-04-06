@@ -64,10 +64,9 @@ NB_MODULE(hiveclaw_mlx_ext, m) {
     // Ensure mlx.core is loaded first so NB_DOMAIN mlx recognizes Python mlx.core.array.
     (void)nb::module_::import_("mlx.core");
 
-    m.def("get_latent_dim", []() { return static_cast<int>(HCLW_SCENT_ELEMS); });
-
     nb::class_<SlabHandle>(m, "SlabHandle")
         .def(nb::init<uint32_t>(), nb::arg("surface_id"))
+        .def("get_latent_dim", &SlabHandle::get_latent_dim)
         .def(
             "write",
             [](SlabHandle& self,

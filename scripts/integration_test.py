@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Subprocess integration checks for HiveClaw v5 (macOS + pheromoned required).
+Subprocess integration checks for HiveClaw v6 (macOS + pheromoned required).
 
-Exit 0: SlabClient XPC v5 handshake, global header, read_slot_v5 shape.
+Exit 0: SlabClient XPC handshake, global header, read_slot_v5 shape (latent dim from slab).
 Review stderr for JSON telemetry (torn_epoch_skip, etc.) manually for PR merges.
 
 Usage:
@@ -12,7 +12,7 @@ Usage:
   python scripts/integration_test.py --quick   # XPC + import only
   python scripts/integration_test.py --stress  # + claim/release loop + swarm_spike child
   python scripts/integration_test.py --stress --stress-max-slots 4096  # full slab gauntlet
-  python scripts/integration_test.py --batched   # read_slots / write_slots v5 (daemon required)
+  python scripts/integration_test.py --batched   # read_slots / write_slots (daemon required)
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-EXPECT_MAGIC = 0x48434C5700000005
+EXPECT_MAGIC = 0x48434C5700000006
 
 
 def _stress_claim_release(n_slots: int) -> None:
@@ -51,6 +51,7 @@ def _batched_slab_roundtrip() -> None:
     import hiveclaw_python as h
 
     c = h.SlabClient()
+    d = int(c.get_latent_dim())
     slots = [200, 201, 202, 203]
     for s in slots:
         cand = mx.array([s], dtype=mx.int32)
@@ -62,9 +63,9 @@ def _batched_slab_roundtrip() -> None:
     si = mx.array(slots, dtype=mx.int32)
     data, st = c.read_slots(si)
     mx.eval(data, st)
-    assert list(data.shape) == [B, 1, 256], data.shape
+    assert list(data.shape) == [B, 1, d], data.shape
     assert list(st.shape) == [B], st.shape
-    latent = mx.ones((B, 1, 256), dtype=mx.bfloat16)
+    latent = mx.ones((B, 1, d), dtype=mx.bfloat16)
     out, wst = c.write_slots(si, latent)
     mx.eval(out, wst)
     assert list(wst.shape) == [B]
@@ -76,7 +77,7 @@ def _batched_slab_roundtrip() -> None:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="HiveClaw v5 integration harness")
+    p = argparse.ArgumentParser(description="HiveClaw v6 integration harness")
     p.add_argument(
         "--quick",
         action="store_true",
@@ -110,12 +111,12 @@ def main() -> int:
             py,
             "-c",
             "import hiveclaw_python as h; c=h.SlabClient(); "
-            f"assert c.get_latent_dim()==256; "
+            "d=int(c.get_latent_dim()); assert d>=1; "
             f"assert c.read_u64_at(0)=={EXPECT_MAGIC}; "
-            "assert c.read_u32_at(8)==5; "
+            "assert c.read_u32_at(8)==6; "
             "import mlx.core as mx; z=c.read_slot_v5(0); "
-            "assert list(z.shape)==[1,1,256]; "
-            "print('ok', c.get_latent_dim())",
+            "assert list(z.shape)==[1,1,d]; "
+            "print('ok', d)",
         ],
         cwd=repo,
         capture_output=True,

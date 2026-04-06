@@ -17,3 +17,14 @@ hiveclaw-server = "hiveclaw_python.server_main:main"
 module-name = "hiveclaw_python._core"
 python-source = "python"
 manifest-path = "Cargo.toml"
+# CI stages this path before build; force wheel inclusion even if gitignored locally.
+include = [
+    { path = "python/hiveclaw_python/native/macos_arm64/pheromoned", format = "wheel" },
+]
+
+[tool.cibuildwheel]
+# Single wheel tag; runner must be macOS arm64 (GitHub macos-14).
+build = "cp311-*"
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]

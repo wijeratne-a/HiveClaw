@@ -162,10 +162,14 @@ def test_real_duplicate_rejected() -> None:
     raise AssertionError("expected ValueError for duplicate real slots")
 
 
+_MOCK_LATENT = 256
+_MOCK_HIDDEN = 2048
+
+
 class _MockSlabSlots:
     def read_slots(self, slots, depends=None):
         B = int(slots.shape[0])
-        return mx.zeros((B, 1, 256), dtype=mx.bfloat16), mx.zeros(
+        return mx.zeros((B, 1, _MOCK_LATENT), dtype=mx.bfloat16), mx.zeros(
             (B,), dtype=mx.uint8
         )
 
@@ -177,15 +181,15 @@ def test_static_shape_steering() -> None:
     from hiveclaw_steering import apply_steering_sandwich
 
     B = 4
-    h = mx.ones((B, 1, 2048), dtype=mx.float32)
+    h = mx.ones((B, 1, _MOCK_HIDDEN), dtype=mx.float32)
     slots = mx.array([0, 1, -1, -1], dtype=mx.int32)
-    W = mx.zeros((256, 2048), dtype=mx.float32)
-    b = mx.zeros((2048,), dtype=mx.float32)
+    W = mx.zeros((_MOCK_LATENT, _MOCK_HIDDEN), dtype=mx.float32)
+    b = mx.zeros((_MOCK_HIDDEN,), dtype=mx.float32)
     H, norm, wst = apply_steering_sandwich(
         h, _MockSlabSlots(), slots, W, b, 0.0, b_enc=None
     )
     mx.eval(H, norm, wst)
-    assert tuple(H.shape) == (B, 1, 2048)
+    assert tuple(H.shape) == (B, 1, _MOCK_HIDDEN)
     assert tuple(norm.shape) == (B, 1, 1)
     assert tuple(wst.shape) == (1,) and wst.dtype == mx.uint32
 

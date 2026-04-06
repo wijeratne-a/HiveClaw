@@ -13,8 +13,6 @@
 #include <mlx/mlx.h>
 #include <mlx/primitives.h>
 
-constexpr size_t HIVECLAW_SLAB_SIZE = 4'718'720;
-
 // Holds the long-lived MTL::Buffer* for the IOSurface slab.
 class SlabHandle {
    public:
@@ -76,9 +74,16 @@ class SlabHandle {
 
     MTL::Buffer* raw_buffer() const { return slab_buf_; }
 
+    int get_latent_dim() const { return static_cast<int>(latent_elems_); }
+
    private:
     MTL::Buffer* slab_buf_{nullptr};
     uint32_t surface_id_{0};
+    uint32_t latent_elems_{0};
+    uint32_t stride_{0};
+    uint32_t back_epoch_off_{0};
+    uint32_t n_slots_{0};
+    size_t slab_bytes_{0};
 };
 
 // MLX Primitive: copies scent_c → slab[byte_offset], returns scent_c (identity).
@@ -88,7 +93,9 @@ class WriteSlab : public mlx::core::UnaryPrimitive {
               size_t byte_offset,
               size_t num_bytes,
               mlx::core::Stream s,
-              uint32_t stamp_slot_index = 0xFFFFFFFFu);
+              uint32_t stamp_slot_index = 0xFFFFFFFFu,
+              uint32_t v5_back_epoch_off = 0,
+              uint32_t v5_latent_elems = 0);
     void eval_cpu(const std::vector<mlx::core::array>& in, mlx::core::array& out) override;
     void eval_gpu(const std::vector<mlx::core::array>& in, mlx::core::array& out) override;
     std::vector<mlx::core::array> jvp(
@@ -112,6 +119,8 @@ class WriteSlab : public mlx::core::UnaryPrimitive {
     size_t byte_offset_;
     size_t num_bytes_;
     uint32_t stamp_slot_index_;
+    uint32_t v5_back_epoch_off_{0};
+    uint32_t v5_latent_elems_{0};
 };
 
 // MLX Primitive: copies slab[byte_offset] → fresh bf16 array; optional v5 epoch torn check.
@@ -121,7 +130,9 @@ class ReadSlab : public mlx::core::Primitive {
              size_t byte_offset,
              mlx::core::Shape shape,
              mlx::core::Stream s,
-             std::optional<uint32_t> v5_slot_for_epoch = std::nullopt);
+             std::optional<uint32_t> v5_slot_for_epoch = std::nullopt,
+             uint32_t v5_back_epoch_off = 0,
+             uint32_t v5_latent_elems = 0);
     ~ReadSlab() override;
     void eval_cpu(const std::vector<mlx::core::array>& inputs,
                   std::vector<mlx::core::array>& outputs) override;
@@ -148,6 +159,8 @@ class ReadSlab : public mlx::core::Primitive {
     size_t byte_offset_;
     mlx::core::Shape shape_;
     std::optional<uint32_t> v5_slot_for_epoch_;
+    uint32_t v5_back_epoch_off_{0};
+    uint32_t v5_latent_elems_{0};
     /// 1-byte shared; v5 GPU path only; completion handler may emit telemetry.
     MTL::Buffer* status_buf_{nullptr};
 };
@@ -173,7 +186,10 @@ class ReadSlabBatchedOp : public mlx::core::Primitive {
     ReadSlabBatchedOp(MTL::Buffer* slab,
                       std::vector<uint32_t> slot_indices,
                       std::shared_ptr<BatchStatusBuffer> status_ctx,
-                      mlx::core::Stream s);
+                      mlx::core::Stream s,
+                      uint32_t latent_elems,
+                      uint32_t stride,
+                      uint32_t back_epoch_off);
     ~ReadSlabBatchedOp() override;
     void eval_cpu(const std::vector<mlx::core::array>& inputs,
                   std::vector<mlx::core::array>& outputs) override;
@@ -199,6 +215,9 @@ class ReadSlabBatchedOp : public mlx::core::Primitive {
     MTL::Buffer* slab_buf_;
     std::vector<uint32_t> slot_indices_;
     std::shared_ptr<BatchStatusBuffer> status_ctx_;
+    uint32_t latent_elems_{0};
+    uint32_t stride_{0};
+    uint32_t back_epoch_off_{0};
 };
 
 /// Copies BatchStatusBuffer → mlx uint8 [B]; input array is graph dependency only.
@@ -233,7 +252,10 @@ class WriteSlabBatchedOp : public mlx::core::Primitive {
     WriteSlabBatchedOp(MTL::Buffer* slab,
                        std::vector<uint32_t> slot_indices,
                        std::shared_ptr<BatchStatusBuffer> status_ctx,
-                       mlx::core::Stream s);
+                       mlx::core::Stream s,
+                       uint32_t latent_elems,
+                       uint32_t stride,
+                       uint32_t back_epoch_off);
     ~WriteSlabBatchedOp() override;
     void eval_cpu(const std::vector<mlx::core::array>& inputs,
                   std::vector<mlx::core::array>& outputs) override;
@@ -259,4 +281,7 @@ class WriteSlabBatchedOp : public mlx::core::Primitive {
     MTL::Buffer* slab_buf_;
     std::vector<uint32_t> slot_indices_;
     std::shared_ptr<BatchStatusBuffer> status_ctx_;
+    uint32_t latent_elems_{0};
+    uint32_t stride_{0};
+    uint32_t back_epoch_off_{0};
 };

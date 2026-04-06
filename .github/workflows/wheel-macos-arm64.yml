@@ -1,4 +1,4 @@
-# Build a macOS arm64 wheel (PyO3 extension + optional bundled pheromoned).
+# Build a macOS arm64 wheel (PyO3 extension + bundled pheromoned) via cibuildwheel → maturin.
 # Artifact: hiveclaw-python-wheel-macos-arm64/*.whl
 name: Wheel macOS arm64
 
@@ -28,11 +28,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install maturin
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install "maturin>=1.5,<2"
-
       - name: Build pheromoned (release)
         run: cargo build --release -p hiveclaw-daemon
 
@@ -42,11 +37,15 @@ jobs:
           cp target/release/pheromoned crates/hiveclaw-python/python/hiveclaw_python/native/macos_arm64/
           chmod +x crates/hiveclaw-python/python/hiveclaw_python/native/macos_arm64/pheromoned
 
-      - name: Maturin build
-        working-directory: crates/hiveclaw-python
-        run: maturin build --release -o dist
+      - name: Build wheel (cibuildwheel + maturin)
+        uses: pypa/cibuildwheel@v2.22.0
+        with:
+          package-dir: crates/hiveclaw-python
+        env:
+          CIBW_BUILD: cp311-*
+          CIBW_ARCHS_MACOS: arm64
 
       - uses: actions/upload-artifact@v4
         with:
           name: hiveclaw-python-wheel-macos-arm64
-          path: crates/hiveclaw-python/dist/*.whl
+          path: crates/hiveclaw-python/wheelhouse/*.whl

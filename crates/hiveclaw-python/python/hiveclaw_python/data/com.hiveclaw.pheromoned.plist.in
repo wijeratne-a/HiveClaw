@@ -7,6 +7,8 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>@PROGRAM@</string>
+		<string>--latent-dim</string>
+		<string>256</string>
 	</array>
 	<key>MachServices</key>
 	<dict>

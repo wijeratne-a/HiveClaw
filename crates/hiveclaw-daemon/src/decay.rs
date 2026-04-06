@@ -1,13 +1,12 @@
 //! Background CPU decay loop for Phase C slab slots (daemon only).
 
 use hiveclaw_core::math::{
-    N_SLOTS, OFF_G_DECAY_RATE, OFF_G_ZETA_T, OFF_S_LAST_CLAIM_MACH, OFF_S_SLOT_STATE,
-    SCENT_ELEMS, SLOT_STATUS_CLAIMED, SLOT_STATUS_FREE, SLOT_STRIDE, STALE_LOCK_MS, slot_base,
-    slot_payload, slot_status,
+    OFF_G_DECAY_RATE, OFF_G_ZETA_T, OFF_S_LAST_CLAIM_MACH, OFF_S_SLOT_STATE, SlabLayout,
+    SLOT_STATUS_CLAIMED, SLOT_STATUS_FREE, STALE_LOCK_MS, slot_status,
 };
 use half::bf16;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -31,7 +30,6 @@ fn stale_threshold_mach_ticks() -> u64 {
             if mach_timebase_info(&mut info) != 0 || info.numer == 0 || info.denom == 0 {
                 return 0;
             }
-            // ns = ticks * numer / denom  =>  ticks = ns * denom / numer
             let ns = STALE_LOCK_MS.saturating_mul(1_000_000);
             ns.saturating_mul(info.denom as u64) / info.numer as u64
         }
@@ -42,19 +40,18 @@ fn stale_threshold_mach_ticks() -> u64 {
 
 /// Start a detached thread that periodically advances `global_zeta_t`, decays unclaimed slot
 /// payloads, and force-evicts stale held slots (Mach time).
-pub fn start_decay_loop(base: *mut u8, tick_ms: u64) {
+pub fn start_decay_loop(base: *mut u8, tick_ms: u64, layout: SlabLayout) {
     let base_usize = base as usize;
+    let layout = Arc::new(layout);
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_millis(tick_ms));
-
-        // SAFETY: `base_usize` is the leaked IOSurface mapping for the daemon lifetime.
         unsafe {
-            decay_tick(base_usize as *mut u8);
+            decay_tick(base_usize as *mut u8, &layout);
         }
     });
 }
 
-unsafe fn decay_tick(base: *mut u8) {
+unsafe fn decay_tick(base: *mut u8, layout: &SlabLayout) {
     let zeta_ptr = (base as usize + OFF_G_ZETA_T) as *mut f32;
     let zeta = zeta_ptr.read_volatile();
     let decay_rate = (base as usize + OFF_G_DECAY_RATE) as *const f32;
@@ -66,9 +63,11 @@ unsafe fn decay_tick(base: *mut u8) {
 
     let threshold = stale_threshold_mach_ticks();
     let now = mach_now();
+    let latent = layout.latent_elems as usize;
+    let n = layout.n_slots as usize;
 
-    for i in 0..N_SLOTS {
-        let hdr_base = base as usize + slot_base(i);
+    for i in 0..n {
+        let hdr_base = base as usize + layout.slot_base(i);
         let state_ptr = (hdr_base + OFF_S_SLOT_STATE) as *const AtomicU32;
         let word = (*state_ptr).load(Ordering::Acquire);
         let st = slot_status(word);
@@ -77,15 +76,14 @@ unsafe fn decay_tick(base: *mut u8) {
             let mach_ptr = (hdr_base + OFF_S_LAST_CLAIM_MACH) as *const u64;
             let last = mach_ptr.read_unaligned();
             if threshold > 0 && now >= last && now - last >= threshold {
-                force_evict_slot(base, i);
+                force_evict_slot(base, layout, i);
             }
             continue;
         }
 
         if st == SLOT_STATUS_FREE {
-            decay_slot_payload(base, i, scale);
+            decay_slot_payload(base, layout.slot_payload(i), latent, scale);
         }
-        // INHIBITED / FAULT: do not decay payload
     }
 }
 
@@ -99,14 +97,15 @@ fn mach_now() -> u64 {
     0
 }
 
-unsafe fn force_evict_slot(base: *mut u8, slot_index: usize) {
-    let p = base.add(slot_base(slot_index));
-    std::ptr::write_bytes(p, 0, SLOT_STRIDE);
+unsafe fn force_evict_slot(base: *mut u8, layout: &SlabLayout, slot_index: usize) {
+    let stride = layout.stride as usize;
+    let hdr = base.add(layout.slot_base(slot_index));
+    std::ptr::write_bytes(hdr, 0, stride);
 }
 
-unsafe fn decay_slot_payload(base: *mut u8, slot_index: usize, scale: f32) {
-    let payload = (base as usize + slot_payload(slot_index)) as *mut bf16;
-    for j in 0..SCENT_ELEMS {
+unsafe fn decay_slot_payload(base: *mut u8, payload_off: usize, latent: usize, scale: f32) {
+    let payload = (base as usize + payload_off) as *mut bf16;
+    for j in 0..latent {
         let v = payload.add(j).read();
         let f = v.to_f32() * scale;
         payload.add(j).write(bf16::from_f32(f));

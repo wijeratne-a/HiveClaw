@@ -3,9 +3,7 @@
 use block2::{Block, RcBlock};
 use half::bf16;
 use hiveclaw_backend_metal::MetalPheromoneBuffer;
-use hiveclaw_core::math::{
-    layout_magic_version_u64, OFF_G_VERSION_V5, SCENT_ELEMS, SLAB_SIZE, SLAB_VERSION_V5,
-};
+use hiveclaw_core::math::{layout_magic_version_u64, read_layout_from_header};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -205,13 +203,13 @@ fn connect_and_fetch_surface_v5() -> Result<(XpcConn, u32), String> {
     Ok((XpcConn(conn), sid as u32))
 }
 
-fn bounds_end(byte_offset: usize, num_bytes: usize) -> PyResult<usize> {
+fn bounds_end(slab_bytes: usize, byte_offset: usize, num_bytes: usize) -> PyResult<usize> {
     let end = byte_offset
         .checked_add(num_bytes)
         .ok_or_else(|| PyValueError::new_err("byte offset + length overflow"))?;
-    if end > SLAB_SIZE {
+    if end > slab_bytes {
         return Err(PyValueError::new_err(format!(
-            "range exceeds slab: end {end} > SLAB_SIZE {SLAB_SIZE}"
+            "range exceeds slab: end {end} > slab_bytes {slab_bytes}"
         )));
     }
     Ok(end)
@@ -222,6 +220,9 @@ pub struct SlabClient {
     /// Fields drop in declaration order: `buf` first (Metal/IOSurface), then `_conn` (XPC invalidates daemon).
     buf: MetalPheromoneBuffer,
     _conn: XpcConn,
+    latent_elems: usize,
+    slab_bytes: usize,
+    n_slots: usize,
 }
 
 #[pymethods]
@@ -238,15 +239,20 @@ impl SlabClient {
         let buf = MetalPheromoneBuffer::from_surface_id(id);
         let base = buf.base_ptr();
         let magic = unsafe { ptr::read_unaligned(base as *const u64) };
-        let ver = unsafe { ptr::read_unaligned(base.add(OFF_G_VERSION_V5) as *const u32) };
-        if magic != layout_magic_version_u64() || ver != SLAB_VERSION_V5 {
+        if magic != layout_magic_version_u64() {
             return Err(PyValueError::new_err(
-                "Corrupted slab: global header validation failed",
+                "Corrupted slab: global header magic mismatch (need slab v6 daemon)",
             ));
         }
+        let lay = unsafe { read_layout_from_header(base as *const u8) }
+            .map_err(|e| PyValueError::new_err(format!("slab layout: {e}")))?;
+        let slab_bytes = buf.slab_size();
         Ok(Self {
             buf,
             _conn: xpc_conn,
+            latent_elems: lay.latent_elems as usize,
+            slab_bytes,
+            n_slots: lay.n_slots as usize,
         })
     }
 
@@ -264,7 +270,7 @@ impl SlabClient {
             .len()
             .checked_mul(2)
             .ok_or_else(|| PyValueError::new_err("length overflow"))?;
-        bounds_end(byte_offset, num_bytes)?;
+        bounds_end(self.slab_bytes, byte_offset, num_bytes)?;
 
         let bf16s: Vec<bf16> = data.iter().copied().map(bf16::from_f32).collect();
         let base = self.buf.base_ptr();
@@ -285,7 +291,7 @@ impl SlabClient {
         let num_bytes = num_elements
             .checked_mul(2)
             .ok_or_else(|| PyValueError::new_err("length overflow"))?;
-        bounds_end(byte_offset, num_bytes)?;
+        bounds_end(self.slab_bytes, byte_offset, num_bytes)?;
 
         let base = self.buf.base_ptr();
         fence(Ordering::SeqCst);
@@ -298,14 +304,22 @@ impl SlabClient {
         Ok(out)
     }
 
-    /// Number of bf16 latent elements per Phase C slot (256 for v5 SAE).
+    /// Number of bf16 latent elements per Phase C slot (from IOSurface global header v6).
     pub fn get_latent_dim(&self) -> usize {
-        SCENT_ELEMS
+        self.latent_elems
+    }
+
+    pub fn slab_size(&self) -> usize {
+        self.slab_bytes
+    }
+
+    pub fn n_slots(&self) -> usize {
+        self.n_slots
     }
 
     /// Read a little-endian `u32` from the mapped slab (epoch headers).
     pub fn read_u32_at(&self, byte_offset: usize) -> PyResult<u32> {
-        bounds_end(byte_offset, 4)?;
+        bounds_end(self.slab_bytes, byte_offset, 4)?;
         let base = self.buf.base_ptr();
         let v = unsafe { ptr::read_unaligned(base.add(byte_offset) as *const u32) };
         fence(Ordering::Acquire);
@@ -314,7 +328,7 @@ impl SlabClient {
 
     /// Write a little-endian `u32` (e.g. to perturb `front_epoch` in slab tests).
     pub fn write_u32_at(&mut self, byte_offset: usize, value: u32) -> PyResult<()> {
-        bounds_end(byte_offset, 4)?;
+        bounds_end(self.slab_bytes, byte_offset, 4)?;
         let base = self.buf.base_ptr();
         unsafe {
             ptr::write_unaligned(base.add(byte_offset) as *mut u32, value.to_le());
@@ -325,7 +339,7 @@ impl SlabClient {
 
     /// Read a little-endian `u64` from the mapped slab (global header magic).
     pub fn read_u64_at(&self, byte_offset: usize) -> PyResult<u64> {
-        bounds_end(byte_offset, 8)?;
+        bounds_end(self.slab_bytes, byte_offset, 8)?;
         let base = self.buf.base_ptr();
         let v = unsafe { ptr::read_unaligned(base.add(byte_offset) as *const u64) };
         fence(Ordering::Acquire);

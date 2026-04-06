@@ -28,14 +28,19 @@ from hiveclaw_steering import (
 
 SAE_PATH = _scripts_dir.parent / "models/hiveclaw_sae_v1.safetensors"
 
-# hiveclaw_layout_v5: slot header `front_epoch` u32 @ +12 from slot base.
+# hiveclaw_layout v6: slot header `front_epoch` u32 @ +12 from slot base; stride = 128 + 2*D.
 _HCLW_GLOBAL_HDR = 4096
-_HCLW_SLOT_STRIDE = 640
+_HCLW_SLOT_HDR = 64
+_HCLW_SLOT_FOOTER = 64
 _OFF_S_FRONT_EPOCH = 12
 
 
-def _slot_front_epoch_byte_off(slot: int) -> int:
-    return _HCLW_GLOBAL_HDR + int(slot) * _HCLW_SLOT_STRIDE + _OFF_S_FRONT_EPOCH
+def _slot_stride_bytes(latent_elems: int) -> int:
+    return _HCLW_SLOT_HDR + int(latent_elems) * 2 + _HCLW_SLOT_FOOTER
+
+
+def _slot_front_epoch_byte_off(slot: int, latent_elems: int) -> int:
+    return _HCLW_GLOBAL_HDR + int(slot) * _slot_stride_bytes(latent_elems) + _OFF_S_FRONT_EPOCH
 
 
 def test_parity_b1() -> None:
@@ -43,6 +48,7 @@ def test_parity_b1() -> None:
     np.random.seed(42)
     c = h.SlabClient()
     check_latent_dim(c)
+    d = int(c.get_latent_dim())
     sae = load_sae(SAE_PATH)
     W_enc = sae["encoder.weight"]
     b_dec = sae["decoder.bias"]
@@ -50,9 +56,9 @@ def test_parity_b1() -> None:
     r = c.claim_task(mx.array([slot], dtype=mx.int32))
     mx.eval(r)
     assert int(mx.array(r).item()) == slot
-    latent = mx.ones((1, 1, 256), dtype=mx.bfloat16) * 0.01
+    latent = mx.ones((1, 1, d), dtype=mx.bfloat16) * 0.01
     mx.eval(c.write_slot_v5(slot, latent))
-    h_step = mx.random.normal((1, 1, 2048), dtype=mx.float32)
+    h_step = mx.random.normal((1, 1, int(W_enc.shape[1])), dtype=mx.float32)
     mx.eval(h_step)
     alpha = 0.1
     a = steer_hidden(h_step, c, slot, W_enc, b_dec, alpha)
@@ -72,20 +78,21 @@ def test_parity_b1() -> None:
 def test_b2_shapes() -> None:
     c = h.SlabClient()
     check_latent_dim(c)
+    d = int(c.get_latent_dim())
     slots = [20, 21]
     for s in slots:
         r = c.claim_task(mx.array([s], dtype=mx.int32))
         mx.eval(r)
         assert int(mx.array(r).item()) == s
-        z = mx.ones((1, 1, 256), dtype=mx.bfloat16) * (0.02 if s == 20 else 0.03)
+        z = mx.ones((1, 1, d), dtype=mx.bfloat16) * (0.02 if s == 20 else 0.03)
         mx.eval(c.write_slot_v5(s, z))
     si = mx.array(slots, dtype=mx.int32)
     data, st = c.read_slots(si)
     mx.eval(data, st)
-    assert list(data.shape) == [2, 1, 256]
+    assert list(data.shape) == [2, 1, d]
     assert list(st.shape) == [2]
     assert bool(np.all(np.array(st, dtype=np.uint8) == 0))
-    latent = mx.ones((2, 1, 256), dtype=mx.bfloat16) * 0.04
+    latent = mx.ones((2, 1, d), dtype=mx.bfloat16) * 0.04
     out, wst = c.write_slots(si, latent)
     mx.eval(out, wst)
     assert list(wst.shape) == [2]
@@ -98,13 +105,14 @@ def test_b2_shapes() -> None:
 def test_torn_epoch_batched_read() -> None:
     c = h.SlabClient()
     check_latent_dim(c)
+    d = int(c.get_latent_dim())
     slot = 14
     r = c.claim_task(mx.array([slot], dtype=mx.int32))
     mx.eval(r)
     assert int(mx.array(r).item()) == slot
-    latent = mx.ones((1, 1, 256), dtype=mx.bfloat16) * 0.05
+    latent = mx.ones((1, 1, d), dtype=mx.bfloat16) * 0.05
     mx.eval(c.write_slot_v5(slot, latent))
-    c.write_u32_at(_slot_front_epoch_byte_off(slot), 0xDEADBEEF)
+    c.write_u32_at(_slot_front_epoch_byte_off(slot, d), 0xDEADBEEF)
     si = mx.array([slot], dtype=mx.int32)
     data, st = c.read_slots(si)
     mx.eval(data, st)
@@ -117,6 +125,7 @@ def test_torn_epoch_batched_read() -> None:
 def test_clamp_batch_telemetry() -> None:
     c = h.SlabClient()
     check_latent_dim(c)
+    d = int(c.get_latent_dim())
     sae = load_sae(SAE_PATH)
     W_enc = sae["encoder.weight"]
     b_dec = sae["decoder.bias"]
@@ -124,9 +133,9 @@ def test_clamp_batch_telemetry() -> None:
     r = c.claim_task(mx.array([slot], dtype=mx.int32))
     mx.eval(r)
     assert int(mx.array(r).item()) == slot
-    latent = mx.ones((1, 1, 256), dtype=mx.bfloat16) * 8.0
+    latent = mx.ones((1, 1, d), dtype=mx.bfloat16) * 8.0
     mx.eval(c.write_slot_v5(slot, latent))
-    h_step = mx.zeros((1, 1, 2048), dtype=mx.float32)
+    h_step = mx.zeros((1, 1, int(W_enc.shape[1])), dtype=mx.float32)
     buf = io.StringIO()
     with contextlib.redirect_stderr(buf):
         _ = steer_hidden_batched(

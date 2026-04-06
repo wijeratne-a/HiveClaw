@@ -12,9 +12,9 @@ mod ipc_macos {
     use half::bf16;
     use hiveclaw_backend_metal::MetalPheromoneBuffer;
     use hiveclaw_core::math::{
-        layout_magic_version_u64, N_SLOTS, OFF_G_VERSION_V5, OFF_S_CLAIM_FLAG, OFF_S_LAST_CLAIM_MACH,
-        OFF_S_SLOT_STATE, SCENT_ELEMS, SLOT_STATUS_CLAIMED, SLOT_STATUS_INHIBITED, SLOT_STRIDE,
-        pack_slot_claimed, slot_base, slot_payload, slot_status,
+        layout_magic_version_u64, SlabLayout, DEFAULT_LATENT_ELEMS, N_SLOTS, OFF_G_VERSION_V5,
+        OFF_S_CLAIM_FLAG, OFF_S_LAST_CLAIM_MACH, OFF_S_SLOT_STATE, SLOT_STATUS_CLAIMED,
+        SLOT_STATUS_INHIBITED, SLAB_VERSION_V6, pack_slot_claimed, slot_status,
     };
     use hiveclaw_daemon::xpc::fetch_surface_v5;
     use std::fs;
@@ -115,6 +115,10 @@ mod ipc_macos {
         }
     }
 
+    fn default_slab_layout() -> SlabLayout {
+        SlabLayout::try_from_latent_elems(DEFAULT_LATENT_ELEMS, N_SLOTS as u32).unwrap()
+    }
+
     fn wait_for_xpc() -> u32 {
         let start = Instant::now();
         for _ in 0..POLL_MAX {
@@ -130,7 +134,7 @@ mod ipc_macos {
     }
 
     #[test]
-    fn global_header_v5_validation() {
+    fn global_header_v6_validation() {
         let _serial = launchd_serial_lock();
         if std::env::var("HIVECLAW_SKIP_LAUNCHD_TEST").as_deref() == Ok("1") {
             eprintln!("SKIP ipc: HIVECLAW_SKIP_LAUNCHD_TEST=1");
@@ -149,7 +153,7 @@ mod ipc_macos {
         let magic = unsafe { ptr::read_unaligned(base as *const u64) };
         let ver = unsafe { ptr::read_unaligned(base.add(OFF_G_VERSION_V5) as *const u32) };
         assert_eq!(magic, layout_magic_version_u64());
-        assert_eq!(ver, 5);
+        assert_eq!(ver, SLAB_VERSION_V6);
     }
 
     #[test]
@@ -169,8 +173,8 @@ mod ipc_macos {
 
         fence(Ordering::SeqCst);
 
-        assert_eq!(SCENT_ELEMS, 256);
-        let scent0 = slot_payload(0);
+        let lay = default_slab_layout();
+        let scent0 = lay.slot_payload(0);
         let a = bf16::from_f32(0.5);
         let b = bf16::from_f32(-0.5);
         unsafe {
@@ -192,11 +196,11 @@ mod ipc_macos {
     // ── Phase C ─────────────────────────────────────────────────────────────
 
     /// Mirrors `InhibitSlab::eval_cpu` (v5: full slot memset + INHIBITED, no separate watchdog u32).
-    unsafe fn cpu_inhibit_slot(base: *mut u8, slot: usize) {
+    unsafe fn cpu_inhibit_slot(base: *mut u8, slot: usize, lay: &SlabLayout) {
         assert!(slot < N_SLOTS);
         let b = base as usize;
-        let sb = slot_base(slot);
-        ptr::write_bytes((b + sb) as *mut u8, 0, SLOT_STRIDE);
+        let sb = lay.slot_base(slot);
+        ptr::write_bytes((b + sb) as *mut u8, 0, lay.stride as usize);
         let st = (b + sb + OFF_S_SLOT_STATE) as *mut AtomicU32;
         (*st).store(SLOT_STATUS_INHIBITED, Ordering::Release);
     }
@@ -216,7 +220,8 @@ mod ipc_macos {
         let slab = MetalPheromoneBuffer::from_surface_id(id);
         let base = slab.base_ptr() as usize;
         let slot = 6usize;
-        let claim_off = base + slot_base(slot) + OFF_S_CLAIM_FLAG;
+        let lay = default_slab_layout();
+        let claim_off = base + lay.slot_base(slot) + OFF_S_CLAIM_FLAG;
 
         let wins = Arc::new(AtomicU32::new(0));
         let barrier = Arc::new(std::sync::Barrier::new(3));
@@ -270,15 +275,16 @@ mod ipc_macos {
         let slab = MetalPheromoneBuffer::from_surface_id(id);
         let base = slab.base_ptr();
         let slot = 7usize;
+        let lay = default_slab_layout();
 
         unsafe {
-            let sb = slot_base(slot);
+            let sb = lay.slot_base(slot);
             let claim = (base.add(sb + OFF_S_CLAIM_FLAG)) as *mut AtomicU32;
             (*claim).store(pack_slot_claimed(1), Ordering::Release);
-            let payload = (base.add(slot_payload(slot))) as *mut bf16;
+            let payload = (base.add(lay.slot_payload(slot))) as *mut bf16;
             payload.write(bf16::from_f32(1.25));
 
-            cpu_inhibit_slot(base, slot);
+            cpu_inhibit_slot(base, slot, &lay);
 
             let w = (*claim).load(Ordering::Acquire);
             assert_eq!(slot_status(w), SLOT_STATUS_INHIBITED);
@@ -301,7 +307,8 @@ mod ipc_macos {
         let slab = MetalPheromoneBuffer::from_surface_id(id);
         let base = slab.base_ptr();
         let slot = 9usize;
-        let hdr = base as usize + slot_base(slot);
+        let lay = default_slab_layout();
+        let hdr = base as usize + lay.slot_base(slot);
 
         unsafe {
             let claim_p = (hdr + OFF_S_CLAIM_FLAG) as *mut AtomicU32;

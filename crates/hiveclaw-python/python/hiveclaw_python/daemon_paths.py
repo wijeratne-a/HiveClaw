@@ -20,6 +20,9 @@ def bundled_pheromoned_path() -> Path | None:
     """
     Path to a wheel-shipped ``pheromoned`` under ``native/macos_arm64/``, if present.
     CI copies the release binary here before ``maturin build``; git ignores the file.
+
+    ``_PKG_ROOT`` is this module's package directory (``site-packages/hiveclaw_python`` when
+    installed from a wheel), so the binary is discovered without a separate repo root.
     """
     if not is_macos_arm64():
         return None

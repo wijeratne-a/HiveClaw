@@ -37,6 +37,31 @@ namespace {
 // Python batched slots: int32 -1 → bit pattern 0xFFFFFFFF (dummy row; no IOSurface access).
 static constexpr uint32_t HIVECLAW_SENTINEL_SLOT = 0xFFFFFFFFu;
 
+struct SlabParsedHeader {
+    uint32_t latent_elems;
+    uint32_t stride;
+    uint32_t n_slots;
+    size_t slab_bytes;
+};
+
+static SlabParsedHeader parse_slab_header(MTL::Buffer* buf) {
+    void* c = buf->contents();
+    const uint8_t* p = static_cast<const uint8_t*>(c);
+    uint32_t ver = *reinterpret_cast<const uint32_t*>(p + OFF_G_VERSION_V6);
+    if (ver != HCLW_VERSION_V6) {
+        throw std::runtime_error("SlabHandle: IOSurface global header must be slab v6");
+    }
+    uint32_t latent = *reinterpret_cast<const uint32_t*>(p + OFF_G_LATENT_ELEMS);
+    uint32_t stride = *reinterpret_cast<const uint32_t*>(p + OFF_G_STRIDE_V6);
+    uint32_t n = *reinterpret_cast<const uint32_t*>(p + OFF_G_N_SLOTS_V6);
+    uint32_t exp = hclw_slot_stride_bytes(latent);
+    if (stride != exp) {
+        throw std::runtime_error("SlabHandle: stride/latent_elems mismatch in global header");
+    }
+    size_t len = static_cast<size_t>(buf->length());
+    return {latent, stride, n, len};
+}
+
 static const char* COPY_BF16_MSL = R"(
 #include <metal_stdlib>
 using namespace metal;
@@ -50,24 +75,28 @@ kernel void copy_bf16(
 
 )";
 
-// v5: 32 threads × 8 uint16 = 256 latent elems; torn → zeros + status byte.
+// v6: SlabParams via buffer(4); 32-wide threadgroup; latent_elems arbitrary.
 static const char* READ_V5_MSL = R"(
 #include <metal_stdlib>
 using namespace metal;
 
-constant uint HCLW_GLOBAL_HDR = 4096u;
-constant uint HCLW_SLOT_STRIDE = 640u;
-constant uint HCLW_SLOT_HDR = 64u;
-constant uint OFF_S_FRONT_EPOCH = 12u;
-constant uint HCLW_OFF_SLOT_BACK_EPOCH = 576u;
+struct SlabParams {
+  uint global_hdr;
+  uint stride;
+  uint slot_hdr;
+  uint latent_elems;
+  uint back_epoch_off;
+};
 
 kernel void read_slab_v5(
     const device uint8_t* slab [[buffer(0)]],
     device uint16_t* h_out [[buffer(1)]],
     device uint8_t* status [[buffer(2)]],
     constant uint32_t& slot_index [[buffer(3)]],
+    constant SlabParams& P [[buffer(4)]],
     uint tid [[thread_index_in_threadgroup]]) {
-  uint slot_base = HCLW_GLOBAL_HDR + slot_index * HCLW_SLOT_STRIDE;
+  constant uint OFF_S_FRONT_EPOCH = 12u;
+  uint slot_base = P.global_hdr + slot_index * P.stride;
   threadgroup uint front_ep;
   threadgroup uint back_ep;
   threadgroup uint torn;
@@ -78,16 +107,19 @@ kernel void read_slab_v5(
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  uint payload_base = slot_base + HCLW_SLOT_HDR;
-  for (uint k = 0u; k < 8u; k++) {
-    uint i = tid * 8u + k;
-    uint16_t v = *reinterpret_cast<const device uint16_t*>(slab + payload_base + i * 2u);
-    h_out[i] = v;
+  uint payload_base = slot_base + P.slot_hdr;
+  uint L = P.latent_elems;
+  for (uint iter = 0u; iter < (L + 31u) / 32u; ++iter) {
+    uint i = tid + iter * 32u;
+    if (i < L) {
+      uint16_t v = *reinterpret_cast<const device uint16_t*>(slab + payload_base + i * 2u);
+      h_out[i] = v;
+    }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   if (tid == 0u) {
-    back_ep = *reinterpret_cast<const device uint32_t*>(slab + slot_base + HCLW_OFF_SLOT_BACK_EPOCH);
+    back_ep = *reinterpret_cast<const device uint32_t*>(slab + slot_base + P.back_epoch_off);
     if (front_ep != back_ep) {
       torn = 1u;
       status[0] = 1u;
@@ -98,36 +130,43 @@ kernel void read_slab_v5(
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   if (torn != 0u) {
-    for (uint k = 0u; k < 8u; k++) {
-      uint i = tid * 8u + k;
-      h_out[i] = 0u;
+    uint L2 = P.latent_elems;
+    for (uint iter = 0u; iter < (L2 + 31u) / 32u; ++iter) {
+      uint i = tid + iter * 32u;
+      if (i < L2) {
+        h_out[i] = 0u;
+      }
     }
   }
 }
 )";
 
-// Batched v5 read: Z = batch index; 32 threads × 8 uint16 per row; per-row torn → status_out[b]=1.
-// Dummy rows: slot_index 0xFFFFFFFF → zero row, status_out[b]=0, no slab load (barrier-safe).
+// Batched v6 read: params buffer(4); row offset b * latent_elems.
 static const char* READ_V5_BATCHED_MSL = R"(
 #include <metal_stdlib>
 using namespace metal;
 
-constant uint HCLW_GLOBAL_HDR = 4096u;
-constant uint HCLW_SLOT_STRIDE = 640u;
-constant uint HCLW_SLOT_HDR = 64u;
-constant uint OFF_S_FRONT_EPOCH = 12u;
-constant uint HCLW_OFF_SLOT_BACK_EPOCH = 576u;
+struct SlabParams {
+  uint global_hdr;
+  uint stride;
+  uint slot_hdr;
+  uint latent_elems;
+  uint back_epoch_off;
+};
 
 kernel void read_slab_v5_batched(
     const device uint8_t* slab [[buffer(0)]],
     device uint16_t* h_out [[buffer(1)]],
     device uint8_t* status_out [[buffer(2)]],
     const device uint32_t* slot_indices [[buffer(3)]],
+    constant SlabParams& P [[buffer(4)]],
     uint3 tgp [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]]) {
+  constant uint OFF_S_FRONT_EPOCH = 12u;
   uint b = tgp.z;
   uint slot_index = slot_indices[b];
-  device uint16_t* row = h_out + (b * 256u);
+  uint L = P.latent_elems;
+  device uint16_t* row = h_out + (b * L);
 
   threadgroup uint is_sentinel;
   if (tid == 0u) {
@@ -136,9 +175,11 @@ kernel void read_slab_v5_batched(
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   if (is_sentinel != 0u) {
-    for (uint k = 0u; k < 8u; k++) {
-      uint i = tid * 8u + k;
-      row[i] = 0u;
+    for (uint iter = 0u; iter < (L + 31u) / 32u; ++iter) {
+      uint i = tid + iter * 32u;
+      if (i < L) {
+        row[i] = 0u;
+      }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0u) {
@@ -147,7 +188,7 @@ kernel void read_slab_v5_batched(
     return;
   }
 
-  uint slot_base = HCLW_GLOBAL_HDR + slot_index * HCLW_SLOT_STRIDE;
+  uint slot_base = P.global_hdr + slot_index * P.stride;
   threadgroup uint front_ep;
   threadgroup uint back_ep;
   threadgroup uint torn;
@@ -158,16 +199,18 @@ kernel void read_slab_v5_batched(
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  uint payload_base = slot_base + HCLW_SLOT_HDR;
-  for (uint k = 0u; k < 8u; k++) {
-    uint i = tid * 8u + k;
-    uint16_t v = *reinterpret_cast<const device uint16_t*>(slab + payload_base + i * 2u);
-    row[i] = v;
+  uint payload_base = slot_base + P.slot_hdr;
+  for (uint iter = 0u; iter < (L + 31u) / 32u; ++iter) {
+    uint i = tid + iter * 32u;
+    if (i < L) {
+      uint16_t v = *reinterpret_cast<const device uint16_t*>(slab + payload_base + i * 2u);
+      row[i] = v;
+    }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   if (tid == 0u) {
-    back_ep = *reinterpret_cast<const device uint32_t*>(slab + slot_base + HCLW_OFF_SLOT_BACK_EPOCH);
+    back_ep = *reinterpret_cast<const device uint32_t*>(slab + slot_base + P.back_epoch_off);
     if (front_ep != back_ep) {
       torn = 1u;
       status_out[b] = 1u;
@@ -178,40 +221,45 @@ kernel void read_slab_v5_batched(
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   if (torn != 0u) {
-    for (uint k = 0u; k < 8u; k++) {
-      uint i = tid * 8u + k;
-      row[i] = 0u;
+    for (uint iter = 0u; iter < (L + 31u) / 32u; ++iter) {
+      uint i = tid + iter * 32u;
+      if (i < L) {
+        row[i] = 0u;
+      }
     }
   }
 }
 )";
 
-// Batched v5 write: Z = batch row; claim check; epoch-stamped payload.
-// Dummy rows: 0xFFFFFFFF → status_out[b]=0, no slab / epoch mutation (all threads exit after shared barriers).
-// status_out is device (read-write), matching the Ironclad input_rw_status intent at the C++/MSL layer.
+// Batched v6 write: SlabParams buffer(4); row offset b * latent_elems.
 static const char* WRITE_V5_BATCHED_MSL = R"(
 #include <metal_stdlib>
 using namespace metal;
 
-constant uint HCLW_GLOBAL_HDR = 4096u;
-constant uint HCLW_SLOT_STRIDE = 640u;
-constant uint HCLW_SLOT_HDR = 64u;
-constant uint OFF_S_CLAIM_FLAG = 0u;
-constant uint OFF_S_FRONT_EPOCH = 12u;
-constant uint OFF_S_LAST_CLAIM_MACH = 4u;
-constant uint HCLW_OFF_SLOT_BACK_EPOCH = 576u;
-constant uint HCLW_SLOT_STATUS_MASK = 3u;
-constant uint HCLW_SLOT_STATUS_CLAIMED = 1u;
+struct SlabParams {
+  uint global_hdr;
+  uint stride;
+  uint slot_hdr;
+  uint latent_elems;
+  uint back_epoch_off;
+};
 
 kernel void write_slab_v5_batched(
     device uint8_t* slab [[buffer(0)]],
     const device uint16_t* h_in [[buffer(1)]],
     device uint8_t* status_out [[buffer(2)]],
     const device uint32_t* slot_indices [[buffer(3)]],
+    constant SlabParams& P [[buffer(4)]],
     uint3 tgp [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]]) {
+  constant uint OFF_S_CLAIM_FLAG = 0u;
+  constant uint OFF_S_FRONT_EPOCH = 12u;
+  constant uint HCLW_SLOT_STATUS_MASK = 3u;
+  constant uint HCLW_SLOT_STATUS_CLAIMED = 1u;
+
   uint b = tgp.z;
   uint slot_index = slot_indices[b];
+  uint L = P.latent_elems;
 
   threadgroup uint is_sentinel;
   if (tid == 0u) {
@@ -222,7 +270,7 @@ kernel void write_slab_v5_batched(
   uint slot_base = 0u;
   device uint8_t* sh = slab;
   if (is_sentinel == 0u) {
-    slot_base = HCLW_GLOBAL_HDR + slot_index * HCLW_SLOT_STRIDE;
+    slot_base = P.global_hdr + slot_index * P.stride;
     sh = slab + slot_base;
   }
 
@@ -256,16 +304,18 @@ kernel void write_slab_v5_batched(
   }
   threadgroup_barrier(mem_flags::mem_device);
 
-  const device uint16_t* row = h_in + (b * 256u);
-  uint payload_base = slot_base + HCLW_SLOT_HDR;
-  for (uint k = 0u; k < 8u; k++) {
-    uint i = tid * 8u + k;
-    *reinterpret_cast<device uint16_t*>(slab + payload_base + i * 2u) = row[i];
+  const device uint16_t* row = h_in + (b * L);
+  uint payload_base = slot_base + P.slot_hdr;
+  for (uint iter = 0u; iter < (L + 31u) / 32u; ++iter) {
+    uint i = tid + iter * 32u;
+    if (i < L) {
+      *reinterpret_cast<device uint16_t*>(slab + payload_base + i * 2u) = row[i];
+    }
   }
   threadgroup_barrier(mem_flags::mem_device);
 
   if (tid == 0u) {
-    *reinterpret_cast<device uint32_t*>(sh + HCLW_OFF_SLOT_BACK_EPOCH) = epoch_val;
+    *reinterpret_cast<device uint32_t*>(sh + P.back_epoch_off) = epoch_val;
     status_out[b] = 0u;
   }
 }
@@ -336,7 +386,8 @@ static void emit_torn_batch_telemetry(
     std::cerr << oss.str();
 }
 
-static std::vector<uint32_t> validate_slot_indices_batched(const std::vector<uint32_t>& v) {
+static std::vector<uint32_t> validate_slot_indices_batched(const std::vector<uint32_t>& v,
+                                                             uint32_t n_slots) {
     if (v.empty()) {
         throw std::invalid_argument("batched slab: slot_indices must be non-empty");
     }
@@ -345,7 +396,7 @@ static std::vector<uint32_t> validate_slot_indices_batched(const std::vector<uin
         if (x == HIVECLAW_SENTINEL_SLOT) {
             continue;
         }
-        if (x >= HCLW_N_SLOTS) {
+        if (x >= n_slots) {
             throw std::invalid_argument("batched slab: slot_index out of range");
         }
         if (!seen.insert(x).second) {
@@ -355,7 +406,7 @@ static std::vector<uint32_t> validate_slot_indices_batched(const std::vector<uin
     return v;
 }
 
-static void validate_dep_rank3(const std::optional<array>& dep, uint32_t B) {
+static void validate_dep_rank3(const std::optional<array>& dep, uint32_t B, int latent_d) {
     if (!dep) {
         return;
     }
@@ -367,45 +418,46 @@ static void validate_dep_rank3(const std::optional<array>& dep, uint32_t B) {
         throw std::invalid_argument("batched slab depends: expected shape [B,1,D]");
     }
     const int d = sh[2];
-    if (d != 2048 && d != static_cast<int>(HCLW_SCENT_ELEMS)) {
+    if (d != 2048 && d != latent_d) {
         throw std::invalid_argument(
-            "batched slab depends: last dim must be 2048 or 256");
+            "batched slab depends: last dim must be 2048 or latent_dim");
     }
 }
 
-static void validate_latents_batched_shape(const array& latents, uint32_t B) {
+static void validate_latents_batched_shape(const array& latents, uint32_t B, uint32_t latent_d) {
     if (latents.dtype() != bfloat16) {
         throw std::invalid_argument("write_slots_v5: latents must be bfloat16");
     }
     const auto& sh = latents.shape();
     if (sh.size() != 3 || sh[0] != static_cast<int>(B) || sh[1] != 1 ||
-        sh[2] != static_cast<int>(HCLW_SCENT_ELEMS)) {
+        sh[2] != static_cast<int>(latent_d)) {
         throw std::invalid_argument(
-            "write_slots_v5: latents must be [B,1,256] bfloat16");
+            "write_slots_v5: latents must be [B,1,latent_dim] bfloat16");
     }
 }
 
-static void validate_write_dep_256(const std::optional<array>& dep, uint32_t B) {
+static void validate_write_dep_latent(const std::optional<array>& dep, uint32_t B, uint32_t latent_d) {
     if (!dep) {
         return;
     }
-    validate_dep_rank3(dep, B);
-    if (dep->shape()[2] != static_cast<int>(HCLW_SCENT_ELEMS)) {
+    validate_dep_rank3(dep, B, static_cast<int>(latent_d));
+    if (dep->shape()[2] != static_cast<int>(latent_d)) {
         throw std::invalid_argument(
-            "write_slots_v5 depends: expected shape [B,1,256]");
+            "write_slots_v5 depends: expected shape [B,1,latent_dim]");
     }
 }
 
-static void validate_write_v5_stamped(const array& in) {
+static void validate_write_v5_stamped(const array& in, uint32_t latent_d) {
     if (in.dtype() != bfloat16) {
         throw std::invalid_argument("WriteSlab v5: input must be bfloat16");
     }
     const auto& sh = in.shape();
-    if (sh.size() != 3 || sh[0] != 1 || sh[1] != 1 || sh[2] != static_cast<int>(HCLW_SCENT_ELEMS)) {
-        throw std::invalid_argument("WriteSlab v5: input must be [1,1,256] bfloat16");
+    if (sh.size() != 3 || sh[0] != 1 || sh[1] != 1 || sh[2] != static_cast<int>(latent_d)) {
+        throw std::invalid_argument("WriteSlab v5: input must be [1,1,latent_dim] bfloat16");
     }
-    if (in.nbytes() != HCLW_SCENT_BYTES) {
-        throw std::invalid_argument("WriteSlab v5: expected 512-byte payload");
+    const size_t need = static_cast<size_t>(latent_d) * sizeof(uint16_t);
+    if (in.nbytes() != need) {
+        throw std::invalid_argument("WriteSlab v5: latent byte size mismatch");
     }
 }
 
@@ -413,11 +465,17 @@ static void validate_write_v5_stamped(const array& in) {
 
 SlabHandle::SlabHandle(uint32_t surface_id) : surface_id_(surface_id) {
     auto* mtl_dev = mlx::core::metal::device(Device::gpu).mtl_device();
-    void* p = create_slab_buffer(static_cast<void*>(mtl_dev), surface_id, HIVECLAW_SLAB_SIZE);
+    void* p = create_slab_buffer(static_cast<void*>(mtl_dev), surface_id);
     slab_buf_ = static_cast<MTL::Buffer*>(p);
     if (!slab_buf_) {
         throw std::runtime_error("create_slab_buffer failed (IOSurfaceLookup or Metal buffer)");
     }
+    SlabParsedHeader ph = parse_slab_header(slab_buf_);
+    latent_elems_ = ph.latent_elems;
+    stride_ = ph.stride;
+    n_slots_ = ph.n_slots;
+    back_epoch_off_ = hclw_off_slot_back_epoch(latent_elems_);
+    slab_bytes_ = ph.slab_bytes;
 }
 
 SlabHandle::~SlabHandle() {
@@ -430,14 +488,20 @@ SlabHandle::~SlabHandle() {
 array SlabHandle::write_slot(uint32_t slot_index,
                              array scent_c,
                              std::optional<array> dep) {
-    if (slot_index >= HCLW_N_SLOTS) {
+    if (slot_index >= n_slots_) {
         throw std::runtime_error("write_slot: slot_index out of range");
     }
-    const size_t byte_offset = slot_payload(slot_index);
+    const size_t byte_offset = hclw_slot_payload(slot_index, stride_);
     Stream s = default_stream(Device::cpu);
     const size_t nbytes = scent_c.nbytes();
     auto prim = std::make_shared<WriteSlab>(
-        slab_buf_, byte_offset, nbytes, s, slot_index);
+        slab_buf_,
+        byte_offset,
+        nbytes,
+        s,
+        slot_index,
+        back_epoch_off_,
+        latent_elems_);
     std::vector<array> inputs = {std::move(scent_c)};
     array out(inputs[0].shape(), inputs[0].dtype(), std::static_pointer_cast<Primitive>(prim), inputs);
     if (dep) {
@@ -449,7 +513,7 @@ array SlabHandle::write_slot(uint32_t slot_index,
 array SlabHandle::write_slot_v5(uint32_t slot_index,
                                 array latent,
                                 std::optional<array> dep) {
-    validate_write_v5_stamped(latent);
+    validate_write_v5_stamped(latent, latent_elems_);
     return write_slot(slot_index, std::move(latent), std::move(dep));
 }
 
@@ -458,7 +522,8 @@ array SlabHandle::write(size_t byte_offset,
                         std::optional<array> dep) {
     Stream s = default_stream(Device::gpu);
     const size_t nbytes = scent_c.nbytes();
-    auto prim = std::make_shared<WriteSlab>(slab_buf_, byte_offset, nbytes, s);
+    auto prim = std::make_shared<WriteSlab>(
+        slab_buf_, byte_offset, nbytes, s, 0xFFFFFFFFu, 0u, 0u);
     std::vector<array> inputs = {std::move(scent_c)};
     array out(inputs[0].shape(), inputs[0].dtype(), std::static_pointer_cast<Primitive>(prim), inputs);
     if (dep) {
@@ -470,14 +535,14 @@ array SlabHandle::write(size_t byte_offset,
 array SlabHandle::read_slot(uint32_t slot_index,
                             Shape shape,
                             std::optional<array> dep) {
-    if (slot_index >= HCLW_N_SLOTS) {
+    if (slot_index >= n_slots_) {
         throw std::runtime_error("read_slot: slot_index out of range");
     }
-    return read(slot_payload(slot_index), std::move(shape), std::move(dep));
+    return read(hclw_slot_payload(slot_index, stride_), std::move(shape), std::move(dep));
 }
 
 array SlabHandle::read_slot_v5(uint32_t slot_index, std::optional<array> dep) {
-    if (slot_index >= HCLW_N_SLOTS) {
+    if (slot_index >= n_slots_) {
         throw std::runtime_error("read_slot_v5: slot_index out of range");
     }
     Stream s = default_stream(Device::gpu);
@@ -486,16 +551,18 @@ array SlabHandle::read_slot_v5(uint32_t slot_index, std::optional<array> dep) {
     }
     auto prim = std::make_shared<ReadSlab>(
         slab_buf_,
-        slot_payload(slot_index),
-        Shape{1, 1, static_cast<mlx::core::ShapeElem>(HCLW_SCENT_ELEMS)},
+        hclw_slot_payload(slot_index, stride_),
+        Shape{1, 1, static_cast<mlx::core::ShapeElem>(latent_elems_)},
         s,
-        slot_index);
+        slot_index,
+        back_epoch_off_,
+        latent_elems_);
     std::vector<array> inputs;
     if (dep) {
         inputs.push_back(*dep);
     }
     return array(
-        Shape{1, 1, static_cast<mlx::core::ShapeElem>(HCLW_SCENT_ELEMS)},
+        Shape{1, 1, static_cast<mlx::core::ShapeElem>(latent_elems_)},
         bfloat16,
         std::static_pointer_cast<Primitive>(prim),
         inputs);
@@ -504,9 +571,9 @@ array SlabHandle::read_slot_v5(uint32_t slot_index, std::optional<array> dep) {
 std::pair<array, array> SlabHandle::read_slots_v5(
     std::vector<uint32_t> slot_indices,
     std::optional<array> dep) {
-    slot_indices = validate_slot_indices_batched(slot_indices);
+    slot_indices = validate_slot_indices_batched(slot_indices, n_slots_);
     const uint32_t B = static_cast<uint32_t>(slot_indices.size());
-    validate_dep_rank3(dep, B);
+    validate_dep_rank3(dep, B, static_cast<int>(latent_elems_));
 
     Stream s = default_stream(Device::gpu);
     if (dep && dep->has_primitive()) {
@@ -515,13 +582,19 @@ std::pair<array, array> SlabHandle::read_slots_v5(
     MTL::Device* mtl_dev = mlx::core::metal::device(s.device).mtl_device();
     auto status_ctx = std::make_shared<BatchStatusBuffer>(mtl_dev, B);
     auto prim = std::make_shared<ReadSlabBatchedOp>(
-        slab_buf_, std::move(slot_indices), status_ctx, s);
+        slab_buf_,
+        std::move(slot_indices),
+        status_ctx,
+        s,
+        latent_elems_,
+        stride_,
+        back_epoch_off_);
     std::vector<array> inputs;
     if (dep) {
         inputs.push_back(*dep);
     }
     array data(
-        Shape{static_cast<int>(B), 1, static_cast<int>(HCLW_SCENT_ELEMS)},
+        Shape{static_cast<int>(B), 1, static_cast<int>(latent_elems_)},
         bfloat16,
         std::static_pointer_cast<Primitive>(prim),
         inputs);
@@ -538,10 +611,10 @@ std::pair<array, array> SlabHandle::write_slots_v5(
     std::vector<uint32_t> slot_indices,
     array latents,
     std::optional<array> dep) {
-    slot_indices = validate_slot_indices_batched(slot_indices);
+    slot_indices = validate_slot_indices_batched(slot_indices, n_slots_);
     const uint32_t B = static_cast<uint32_t>(slot_indices.size());
-    validate_latents_batched_shape(latents, B);
-    validate_write_dep_256(dep, B);
+    validate_latents_batched_shape(latents, B, latent_elems_);
+    validate_write_dep_latent(dep, B, latent_elems_);
 
     Stream s = default_stream(Device::gpu);
     if (dep && dep->has_primitive()) {
@@ -550,7 +623,13 @@ std::pair<array, array> SlabHandle::write_slots_v5(
     MTL::Device* mtl_dev = mlx::core::metal::device(s.device).mtl_device();
     auto status_ctx = std::make_shared<BatchStatusBuffer>(mtl_dev, B);
     auto prim = std::make_shared<WriteSlabBatchedOp>(
-        slab_buf_, std::move(slot_indices), status_ctx, s);
+        slab_buf_,
+        std::move(slot_indices),
+        status_ctx,
+        s,
+        latent_elems_,
+        stride_,
+        back_epoch_off_);
     std::vector<array> inputs = {std::move(latents)};
     if (dep) {
         inputs.push_back(*dep);
@@ -593,32 +672,35 @@ WriteSlab::WriteSlab(MTL::Buffer* slab,
                      size_t byte_offset,
                      size_t num_bytes,
                      Stream s,
-                     uint32_t stamp_slot_index)
+                     uint32_t stamp_slot_index,
+                     uint32_t v5_back_epoch_off,
+                     uint32_t v5_latent_elems)
     : UnaryPrimitive(s),
       slab_buf_(slab),
       byte_offset_(byte_offset),
       num_bytes_(num_bytes),
-      stamp_slot_index_(stamp_slot_index) {}
+      stamp_slot_index_(stamp_slot_index),
+      v5_back_epoch_off_(v5_back_epoch_off),
+      v5_latent_elems_(v5_latent_elems) {}
 
 void WriteSlab::eval_cpu(const std::vector<array>& inputs, array& out) {
     auto& in = inputs[0];
     if (stamp_slot_index_ != 0xFFFFFFFFu) {
-        validate_write_v5_stamped(in);
+        validate_write_v5_stamped(in, v5_latent_elems_);
     } else if (in.nbytes() != num_bytes_) {
         throw std::runtime_error("WriteSlab: input size mismatch");
     }
     void* dst = static_cast<char*>(slab_buf_->contents()) + byte_offset_;
     if (stamp_slot_index_ != 0xFFFFFFFFu) {
-        char* base = static_cast<char*>(slab_buf_->contents());
-        size_t sb = slot_base(stamp_slot_index_);
-        char* sh = base + sb;
+        char* sh =
+            static_cast<char*>(slab_buf_->contents()) + byte_offset_ - HCLW_SLOT_HDR;
         auto* fe = reinterpret_cast<std::atomic<uint32_t>*>(sh + OFF_S_FRONT_EPOCH);
         uint32_t e = fe->load(std::memory_order_relaxed) + 1u;
         fe->store(e, std::memory_order_release);
         std::atomic_thread_fence(std::memory_order_release);
         std::memcpy(dst, in.data<const uint8_t>(), num_bytes_);
         std::atomic_thread_fence(std::memory_order_release);
-        *reinterpret_cast<uint32_t*>(sh + static_cast<size_t>(HCLW_OFF_SLOT_BACK_EPOCH)) = e;
+        *reinterpret_cast<uint32_t*>(sh + static_cast<size_t>(v5_back_epoch_off_)) = e;
         *reinterpret_cast<uint64_t*>(sh + OFF_S_LAST_CLAIM_MACH) = mach_absolute_time();
     } else {
         std::memcpy(dst, in.data<const uint8_t>(), num_bytes_);
@@ -690,12 +772,16 @@ ReadSlab::ReadSlab(MTL::Buffer* slab,
                    size_t byte_offset,
                    Shape shape,
                    Stream s,
-                   std::optional<uint32_t> v5_slot_for_epoch)
+                   std::optional<uint32_t> v5_slot_for_epoch,
+                   uint32_t v5_back_epoch_off,
+                   uint32_t v5_latent_elems)
     : Primitive(s),
       slab_buf_(slab),
       byte_offset_(byte_offset),
       shape_(std::move(shape)),
-      v5_slot_for_epoch_(v5_slot_for_epoch) {
+      v5_slot_for_epoch_(v5_slot_for_epoch),
+      v5_back_epoch_off_(v5_back_epoch_off),
+      v5_latent_elems_(v5_latent_elems) {
     if (v5_slot_for_epoch_) {
         MTL::Device* dev = mlx::core::metal::device(s.device).mtl_device();
         status_buf_ = dev->newBuffer(1, MTL::ResourceStorageModeShared);
@@ -731,8 +817,8 @@ void ReadSlab::eval_cpu(const std::vector<array>& inputs, std::vector<array>& ou
     }
 
     uint32_t si = *v5_slot_for_epoch_;
-    size_t sb = slot_base(static_cast<size_t>(si));
-    char* hdr = slab_base + sb;
+    char* hdr = slab_base + byte_offset_ - HCLW_SLOT_HDR;
+    const size_t scent_b = static_cast<size_t>(v5_latent_elems_) * 2u;
 
     auto load_u32 = [hdr](size_t off) -> uint32_t {
         return reinterpret_cast<std::atomic<uint32_t>*>(hdr + off)->load(
@@ -740,12 +826,12 @@ void ReadSlab::eval_cpu(const std::vector<array>& inputs, std::vector<array>& ou
     };
 
     const uint32_t fe = load_u32(OFF_S_FRONT_EPOCH);
-    const uint32_t be_pre = load_u32(HCLW_OFF_SLOT_BACK_EPOCH);
-    std::memcpy(h_dst, hdr + HCLW_SLOT_HDR, HCLW_SCENT_BYTES);
+    const uint32_t be_pre = load_u32(static_cast<size_t>(v5_back_epoch_off_));
+    std::memcpy(h_dst, hdr + HCLW_SLOT_HDR, scent_b);
     const uint32_t fe2 = load_u32(OFF_S_FRONT_EPOCH);
-    const uint32_t be2 = load_u32(HCLW_OFF_SLOT_BACK_EPOCH);
+    const uint32_t be2 = load_u32(static_cast<size_t>(v5_back_epoch_off_));
     if (fe != be_pre || fe2 != fe || be2 != be_pre || fe2 != be2) {
-        std::memset(h_dst, 0, HCLW_SCENT_BYTES);
+        std::memset(h_dst, 0, scent_b);
         emit_read_v5_telemetry(1, si);
     }
 }
@@ -787,6 +873,22 @@ void ReadSlab::eval_gpu(const std::vector<array>& inputs, std::vector<array>& ou
     enc.set_buffer(status_buf_, 2, 0);
     uint32_t si = *v5_slot_for_epoch_;
     enc.set_bytes(si, 3);
+
+    struct SlabParamsEnc {
+        uint32_t global_hdr;
+        uint32_t stride;
+        uint32_t slot_hdr;
+        uint32_t latent_elems;
+        uint32_t back_epoch_off;
+    };
+    const uint8_t* gp = static_cast<const uint8_t*>(slab_buf_->contents());
+    SlabParamsEnc P{
+        static_cast<uint32_t>(HCLW_GLOBAL_HDR),
+        *reinterpret_cast<const uint32_t*>(gp + OFF_G_STRIDE_V6),
+        static_cast<uint32_t>(HCLW_SLOT_HDR),
+        v5_latent_elems_,
+        v5_back_epoch_off_};
+    enc.set_bytes(&P, sizeof(P), 4);
 
     enc.dispatch_threadgroups(MTL::Size(1, 1, 1), MTL::Size(32, 1, 1));
 
@@ -869,11 +971,17 @@ ReadSlabBatchedOp::ReadSlabBatchedOp(
     MTL::Buffer* slab,
     std::vector<uint32_t> slot_indices,
     std::shared_ptr<BatchStatusBuffer> status_ctx,
-    Stream s)
+    Stream s,
+    uint32_t latent_elems,
+    uint32_t stride,
+    uint32_t back_epoch_off)
     : Primitive(s),
       slab_buf_(slab),
       slot_indices_(std::move(slot_indices)),
-      status_ctx_(std::move(status_ctx)) {}
+      status_ctx_(std::move(status_ctx)),
+      latent_elems_(latent_elems),
+      stride_(stride),
+      back_epoch_off_(back_epoch_off) {}
 
 ReadSlabBatchedOp::~ReadSlabBatchedOp() = default;
 
@@ -881,7 +989,7 @@ std::vector<Shape> ReadSlabBatchedOp::output_shapes(
     const std::vector<array>& inputs) {
     (void)inputs;
     const auto B = static_cast<mlx::core::ShapeElem>(slot_indices_.size());
-    return {Shape{B, 1, static_cast<mlx::core::ShapeElem>(HCLW_SCENT_ELEMS)}};
+    return {Shape{B, 1, static_cast<mlx::core::ShapeElem>(latent_elems_)}};
 }
 
 void ReadSlabBatchedOp::eval_cpu(
@@ -895,15 +1003,16 @@ void ReadSlabBatchedOp::eval_cpu(
     uint8_t* st = static_cast<uint8_t*>(status_ctx_->buf()->contents());
     char* slab_base = static_cast<char*>(slab_buf_->contents());
 
+    const size_t scent_b = static_cast<size_t>(latent_elems_) * 2u;
     for (uint32_t b = 0; b < B; ++b) {
         uint32_t si = slot_indices_[b];
-        uint16_t* row = h_dst + b * HCLW_SCENT_ELEMS;
+        uint16_t* row = h_dst + b * latent_elems_;
         if (si == HIVECLAW_SENTINEL_SLOT) {
-            std::memset(row, 0, HCLW_SCENT_BYTES);
+            std::memset(row, 0, scent_b);
             st[b] = 0;
             continue;
         }
-        size_t sb = slot_base(si);
+        size_t sb = hclw_slot_base(si, stride_);
         char* hdr = slab_base + sb;
 
         auto load_u32 = [hdr](size_t off) -> uint32_t {
@@ -912,12 +1021,12 @@ void ReadSlabBatchedOp::eval_cpu(
         };
 
         const uint32_t fe = load_u32(OFF_S_FRONT_EPOCH);
-        const uint32_t be_pre = load_u32(HCLW_OFF_SLOT_BACK_EPOCH);
-        std::memcpy(row, hdr + HCLW_SLOT_HDR, HCLW_SCENT_BYTES);
+        const uint32_t be_pre = load_u32(static_cast<size_t>(back_epoch_off_));
+        std::memcpy(row, hdr + HCLW_SLOT_HDR, scent_b);
         const uint32_t fe2 = load_u32(OFF_S_FRONT_EPOCH);
-        const uint32_t be2 = load_u32(HCLW_OFF_SLOT_BACK_EPOCH);
+        const uint32_t be2 = load_u32(static_cast<size_t>(back_epoch_off_));
         if (fe != be_pre || fe2 != fe || be2 != be_pre || fe2 != be2) {
-            std::memset(row, 0, HCLW_SCENT_BYTES);
+            std::memset(row, 0, scent_b);
             st[b] = 1;
         } else {
             st[b] = 0;
@@ -954,7 +1063,7 @@ void ReadSlabBatchedOp::eval_gpu(
     std::memcpy(idx_buf->contents(), slot_indices_.data(), idx_nbytes);
 
     const size_t staging_nbytes =
-        static_cast<size_t>(B) * static_cast<size_t>(HCLW_SCENT_ELEMS) * sizeof(uint16_t);
+        static_cast<size_t>(B) * static_cast<size_t>(latent_elems_) * sizeof(uint16_t);
     MTL::Buffer* staging =
         mtl_dev->newBuffer(static_cast<NS::UInteger>(staging_nbytes), MTL::ResourceStorageModeShared);
     if (staging == nullptr) {
@@ -972,6 +1081,22 @@ void ReadSlabBatchedOp::eval_gpu(
         [] { return std::string(READ_V5_BATCHED_MSL); });
     auto* kernel = d.get_kernel("read_slab_v5_batched", lib);
     enc.set_compute_pipeline_state(kernel);
+
+    struct SlabParamsEnc {
+        uint32_t global_hdr;
+        uint32_t stride;
+        uint32_t slot_hdr;
+        uint32_t latent_elems;
+        uint32_t back_epoch_off;
+    };
+    const uint8_t* gp = static_cast<const uint8_t*>(slab_buf_->contents());
+    SlabParamsEnc P{
+        static_cast<uint32_t>(HCLW_GLOBAL_HDR),
+        *reinterpret_cast<const uint32_t*>(gp + OFF_G_STRIDE_V6),
+        static_cast<uint32_t>(HCLW_SLOT_HDR),
+        latent_elems_,
+        back_epoch_off_};
+    enc.set_bytes(&P, sizeof(P), 4);
 
     // Shared staging: avoids binding MLX output arrays directly with IOSurface-backed slab
     // (kIOGPUCommandBufferCallbackErrorInvalidResource on some driver paths).
@@ -1105,11 +1230,17 @@ WriteSlabBatchedOp::WriteSlabBatchedOp(
     MTL::Buffer* slab,
     std::vector<uint32_t> slot_indices,
     std::shared_ptr<BatchStatusBuffer> status_ctx,
-    Stream s)
+    Stream s,
+    uint32_t latent_elems,
+    uint32_t stride,
+    uint32_t back_epoch_off)
     : Primitive(s),
       slab_buf_(slab),
       slot_indices_(std::move(slot_indices)),
-      status_ctx_(std::move(status_ctx)) {}
+      status_ctx_(std::move(status_ctx)),
+      latent_elems_(latent_elems),
+      stride_(stride),
+      back_epoch_off_(back_epoch_off) {}
 
 WriteSlabBatchedOp::~WriteSlabBatchedOp() = default;
 
@@ -1127,6 +1258,7 @@ void WriteSlabBatchedOp::eval_cpu(
     uint8_t* st = static_cast<uint8_t*>(status_ctx_->buf()->contents());
     const uint16_t* src = in.data<uint16_t>();
     char* slab_base = static_cast<char*>(slab_buf_->contents());
+    const size_t scent_b = static_cast<size_t>(latent_elems_) * 2u;
 
     for (uint32_t b = 0; b < B; ++b) {
         uint32_t si = slot_indices_[b];
@@ -1134,7 +1266,7 @@ void WriteSlabBatchedOp::eval_cpu(
             st[b] = 0;
             continue;
         }
-        size_t sb = slot_base(si);
+        size_t sb = hclw_slot_base(si, stride_);
         char* sh = slab_base + sb;
         auto* claim = reinterpret_cast<std::atomic<uint32_t>*>(sh + OFF_S_CLAIM_FLAG);
         const uint32_t w = claim->load(std::memory_order_relaxed);
@@ -1144,14 +1276,14 @@ void WriteSlabBatchedOp::eval_cpu(
         }
         st[b] = 0;
         void* dst = sh + HCLW_SLOT_HDR;
-        const uint16_t* row = src + b * HCLW_SCENT_ELEMS;
+        const uint16_t* row = src + b * latent_elems_;
         auto* fe = reinterpret_cast<std::atomic<uint32_t>*>(sh + OFF_S_FRONT_EPOCH);
         uint32_t e = fe->load(std::memory_order_relaxed) + 1u;
         fe->store(e, std::memory_order_release);
         std::atomic_thread_fence(std::memory_order_release);
-        std::memcpy(dst, row, HCLW_SCENT_BYTES);
+        std::memcpy(dst, row, scent_b);
         std::atomic_thread_fence(std::memory_order_release);
-        *reinterpret_cast<uint32_t*>(sh + HCLW_OFF_SLOT_BACK_EPOCH) = e;
+        *reinterpret_cast<uint32_t*>(sh + static_cast<size_t>(back_epoch_off_)) = e;
         *reinterpret_cast<uint64_t*>(sh + OFF_S_LAST_CLAIM_MACH) = mach_absolute_time();
     }
     out.copy_shared_buffer(in);
@@ -1190,6 +1322,22 @@ void WriteSlabBatchedOp::eval_gpu(
         [] { return std::string(WRITE_V5_BATCHED_MSL); });
     auto* kernel = d.get_kernel("write_slab_v5_batched", lib);
     enc.set_compute_pipeline_state(kernel);
+
+    struct SlabParamsEnc {
+        uint32_t global_hdr;
+        uint32_t stride;
+        uint32_t slot_hdr;
+        uint32_t latent_elems;
+        uint32_t back_epoch_off;
+    };
+    const uint8_t* gp = static_cast<const uint8_t*>(slab_buf_->contents());
+    SlabParamsEnc P{
+        static_cast<uint32_t>(HCLW_GLOBAL_HDR),
+        *reinterpret_cast<const uint32_t*>(gp + OFF_G_STRIDE_V6),
+        static_cast<uint32_t>(HCLW_SLOT_HDR),
+        latent_elems_,
+        back_epoch_off_};
+    enc.set_bytes(&P, sizeof(P), 4);
 
     // status_out is device uint8_t* (read-write in MSL), matching Ironclad input_rw_status intent
     // at the native layer (no const on status buffer).

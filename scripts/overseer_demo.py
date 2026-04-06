@@ -42,7 +42,8 @@ def _log(msg: str) -> None:
 def _make_goal(rng: np.random.Generator, d: int) -> mx.array:
     g = rng.standard_normal(d, dtype=np.float32)
     g /= float(np.linalg.norm(g) + 1e-7)
-    return mx.array(g, dtype=mx.bfloat16)
+    # v5 write path expects [1,1,latent_dim] bf16 (same element count as 1-D).
+    return mx.array(g, dtype=mx.bfloat16).reshape(1, 1, d)
 
 
 def _agent_worker(

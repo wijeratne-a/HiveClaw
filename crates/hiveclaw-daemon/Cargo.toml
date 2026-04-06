@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 block2 = "0.5"
+clap = { version = "4", features = ["derive"] }
 half = "2"
 hiveclaw-backend-metal = { path = "../hiveclaw-backend-metal" }
 hiveclaw-core = { path = "../hiveclaw-core" }

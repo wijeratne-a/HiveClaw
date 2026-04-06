@@ -1,4 +1,4 @@
-"""Console entrypoint ``hiveclaw-server``: run ``scripts/hiveclaw_server.py`` from a checkout."""
+"""Console entrypoint ``hiveclaw-server``: prefer packaged :mod:`hiveclaw_python.openai_server`."""
 
 from __future__ import annotations
 
@@ -27,12 +27,19 @@ def _scripts_dir_with_server() -> Path | None:
 
 
 def main() -> None:
+    try:
+        from .openai_server import main as run_impl
+
+        run_impl()
+        return
+    except ImportError:
+        pass
     d = _scripts_dir_with_server()
     if d is None:
         print(
-            "hiveclaw-server: could not find scripts/hiveclaw_server.py.\n"
-            "Clone HiveClaw and set HIVECLAW_REPO_ROOT to the repository root, "
-            "or install the package from a tree where find_repo_root() succeeds.",
+            "hiveclaw-server: could not load hiveclaw_python.openai_server "
+            "or find scripts/hiveclaw_server.py.\n"
+            "Run `make python` from a HiveClaw checkout or set HIVECLAW_REPO_ROOT.",
             file=sys.stderr,
         )
         raise SystemExit(1)

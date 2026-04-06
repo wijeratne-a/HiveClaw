@@ -8,7 +8,7 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 use core_foundation_sys::dictionary::CFDictionaryRef;
 use core_foundation_sys::string::CFStringRef;
-use hiveclaw_core::math::SLAB_SIZE;
+use hiveclaw_core::math::SLAB_MAX_BYTES;
 
 /// Opaque IOSurface pointer (avoid exposing a private struct through `pub` APIs).
 pub type IOSurfaceRef = *const c_void;
@@ -33,8 +33,13 @@ unsafe extern "C" {
 pub struct OwnedIosurface(IOSurfaceRef);
 
 impl OwnedIosurface {
-    pub fn create_slab() -> Self {
-        let size = CFNumber::from(SLAB_SIZE as i32);
+    /// Create a global IOSurface with `alloc_size` bytes (will be page-rounded by the system).
+    pub fn create_slab_with_size(alloc_size: usize) -> Self {
+        assert!(
+            alloc_size <= SLAB_MAX_BYTES,
+            "IOSurface alloc_size {alloc_size} exceeds SLAB_MAX_BYTES {SLAB_MAX_BYTES}"
+        );
+        let size = CFNumber::from(alloc_size as i64);
         unsafe {
             let key_size = CFString::wrap_under_get_rule(kIOSurfaceAllocSize as *const _);
             let key_global = CFString::wrap_under_get_rule(kIOSurfaceIsGlobal as *const _);
@@ -46,6 +51,17 @@ impl OwnedIosurface {
             assert!(!surf.is_null(), "IOSurfaceCreate failed");
             Self(surf)
         }
+    }
+
+    /// Default slab size for tests / callers that do not use dynamic layout.
+    pub fn create_slab() -> Self {
+        use hiveclaw_core::math::SlabLayout;
+        let lay = SlabLayout::try_from_latent_elems(
+            hiveclaw_core::math::DEFAULT_LATENT_ELEMS,
+            hiveclaw_core::math::N_SLOTS as u32,
+        )
+        .expect("default slab layout");
+        Self::create_slab_with_size(lay.iosurface_bytes)
     }
 
     pub fn lookup(id: u32) -> Self {
