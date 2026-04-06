@@ -147,11 +147,13 @@ def apply_steering_sandwich(
     *,
     b_enc: mx.array | None = None,
     d_latent: int = 256,
-) -> tuple[mx.array, mx.array]:
+) -> tuple[mx.array, mx.array, mx.array]:
     """Full ``[B_bucket,1,2048]`` steering (no batch-axis slice). Dummy rows: ``batch_slots==-1``.
 
-    Returns ``(H_steered, norm)`` with shapes ``[B_bucket,1,2048]`` and ``[B_bucket,1,1]``.
-    Real rows get steered hidden; dummies are zeroed (Sandwich Gate) before LM head.
+    Returns ``(H_steered, norm, wst)`` with ``H_steered``/``norm`` shapes
+    ``[B_bucket,1,2048]`` and ``[B_bucket,1,1]``. ``wst`` is per-row write status
+    ``[B_bucket]`` uint8 when ``b_enc`` is set; otherwise a shape-stable dummy
+    ``(1,)`` uint32 for ``mx.compile`` tuple consistency (no ``mx.eval`` inside).
     Poison-clamp telemetry is emitted by the caller (e.g. host-side after ``mx.eval``).
 
     When ``b_enc`` is None, skips slab write-back (tests / partial integration).
@@ -180,6 +182,7 @@ def apply_steering_sandwich(
     steered = (h32 + safe.astype(mx.float32)).astype(h_step_bucket.dtype)
     H_steered = mx.where(active_mask > 0, steered, mx.zeros_like(h_step_bucket))
 
+    dummy_wst = mx.zeros((1,), dtype=mx.uint32)
     if b_enc is not None:
         h_f = H_steered.astype(mx.float32)
         latent = mx.maximum(
@@ -187,9 +190,9 @@ def apply_steering_sandwich(
         ).astype(mx.bfloat16)
         latent = latent.reshape(B_bucket, 1, d_latent)
         _, wst = slab_client.write_slots(batch_slots, latent, depends=H_steered)
-        mx.eval(wst)
+        return H_steered, norm, wst
 
-    return H_steered, norm
+    return H_steered, norm, dummy_wst
 
 
 class ActiveSteeringWrapper(nn.Module):
@@ -283,6 +286,11 @@ class BatchedSteeringWrapper(nn.Module):
             "last_steered_norm",
             mx.zeros((bb, 1, 1), dtype=mx.float32),
         )
+        object.__setattr__(
+            self,
+            "last_steered_wst",
+            mx.zeros((1,), dtype=mx.uint32),
+        )
 
     def __getattr__(self, name: str):
         if name in (
@@ -296,6 +304,7 @@ class BatchedSteeringWrapper(nn.Module):
             "current_batch_slots",
             "last_steered_h",
             "last_steered_norm",
+            "last_steered_wst",
         ):
             return super().__getattr__(name)
         try:
@@ -304,13 +313,20 @@ class BatchedSteeringWrapper(nn.Module):
             return super().__getattr__(name)
 
     def __call__(self, *args, **kwargs):
-        out = self.layer(*args, **kwargs)
+        kwargs_fwd = dict(kwargs)
+        batch_slots_kw = kwargs_fwd.pop("batch_slots", None)
+        slots = (
+            batch_slots_kw
+            if batch_slots_kw is not None
+            else self.current_batch_slots
+        )
+        out = self.layer(*args, **kwargs_fwd)
         h = out[0] if isinstance(out, tuple) else out
         h_step = h[:, -1:, :]
-        h_modified, norm = apply_steering_sandwich(
+        h_modified, norm, wst = apply_steering_sandwich(
             h_step,
             self.slab_client,
-            self.current_batch_slots,
+            slots,
             self.W_enc,
             self.b_dec,
             self.alpha,
@@ -319,6 +335,7 @@ class BatchedSteeringWrapper(nn.Module):
         )
         object.__setattr__(self, "last_steered_h", h_modified)
         object.__setattr__(self, "last_steered_norm", norm)
+        object.__setattr__(self, "last_steered_wst", wst)
         if h.shape[1] > 1:
             h_final = mx.concatenate([h[:, :-1, :], h_modified], axis=1)
         else:

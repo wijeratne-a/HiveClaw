@@ -441,6 +441,16 @@ async def lifespan(app: FastAPI):
             f"[hiveclaw_server] OOM probe: max safe batch={effective_max_batch}",
             flush=True,
         )
+        if (
+            os.environ.get("HIVECLAW_COMPILE_DECODE", "1") == "1"
+            and os.environ.get("HIVECLAW_COMPILE_WARMUP", "0") != "1"
+        ):
+            raise ValueError(
+                "Ironclad: HIVECLAW_COMPILE_WARMUP=1 is required when "
+                "HIVECLAW_CONTINUOUS_BATCH=1 and HIVECLAW_COMPILE_DECODE=1. "
+                "Set HIVECLAW_COMPILE_WARMUP=1 so the first client does not absorb "
+                "decode graph compile latency."
+            )
         mq, th, st = start_swarm_batch_worker(
             ctx,
             max_batch=effective_max_batch,

@@ -10,7 +10,7 @@ Criteria (from Phase 1 spec):
 Examples::
 
   # External server (stderr not captured — criterion 2 skipped with a warning):
-  HIVECLAW_CONTINUOUS_BATCH=1 python scripts/hiveclaw_server.py --port 8080
+  HIVECLAW_CONTINUOUS_BATCH=1 HIVECLAW_COMPILE_WARMUP=1 python scripts/hiveclaw_server.py --port 8080
   python scripts/burn_in.py --base-url http://127.0.0.1:8080 --concurrency 55
 
   # Spawned server (all criteria; needs daemon + venv + models):
@@ -192,6 +192,7 @@ def main() -> int:
         base_url = f"http://127.0.0.1:{port}"
         env = os.environ.copy()
         env["HIVECLAW_CONTINUOUS_BATCH"] = "1"
+        env["HIVECLAW_COMPILE_WARMUP"] = "1"
         srv_py = _repo / "scripts" / "hiveclaw_server.py"
         cmd = [
             args.python,

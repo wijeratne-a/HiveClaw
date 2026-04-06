@@ -181,12 +181,13 @@ def test_static_shape_steering() -> None:
     slots = mx.array([0, 1, -1, -1], dtype=mx.int32)
     W = mx.zeros((256, 2048), dtype=mx.float32)
     b = mx.zeros((2048,), dtype=mx.float32)
-    H, norm = apply_steering_sandwich(
+    H, norm, wst = apply_steering_sandwich(
         h, _MockSlabSlots(), slots, W, b, 0.0, b_enc=None
     )
-    mx.eval(H, norm)
+    mx.eval(H, norm, wst)
     assert tuple(H.shape) == (B, 1, 2048)
     assert tuple(norm.shape) == (B, 1, 1)
+    assert tuple(wst.shape) == (1,) and wst.dtype == mx.uint32
 
 
 def test_compiled_decode_no_fallback() -> None:

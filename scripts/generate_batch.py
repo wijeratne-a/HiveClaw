@@ -30,6 +30,7 @@ from hiveclaw_kv_mask import (
 from hiveclaw_steering import BatchedSteeringWrapper
 
 try:
+    from mlx_lm.models.base import create_attention_mask
     from mlx_lm.models.cache import make_prompt_cache
 except ImportError as e:  # pragma: no cover
     raise ImportError(
@@ -178,8 +179,41 @@ def _pad_token_row_to_bucket(
     return mx.concatenate([t, tail], axis=0)
 
 
+def _llama_decode_step_inner(
+    inner: Any,
+    kv_cache: list[Any],
+    steering: Any,
+    ny: mx.array,
+    slots: mx.array,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """One Llama ``model.model`` decode step: layers[:-1] then steering with explicit ``slots``."""
+    h = inner.embed_tokens(ny)
+    fa_idx = int(inner.fa_idx)
+    fa_cache = kv_cache[fa_idx]
+    fa_mask = create_attention_mask(h, fa_cache)
+    swa_idx = getattr(inner, "swa_idx", None)
+    swa_mask = None
+    if swa_idx is not None:
+        swa_mask = create_attention_mask(
+            h, kv_cache[int(swa_idx)], window_size=inner.sliding_window
+        )
+
+    layers = inner.layers
+    n = len(layers)
+    for i in range(n - 1):
+        layer = layers[i]
+        c = kv_cache[i]
+        mask = swa_mask if layer.use_sliding else fa_mask
+        h = layer(h, mask, cache=c)
+
+    mask_last = swa_mask if steering.layer.use_sliding else fa_mask
+    h = steering(h, mask_last, cache=kv_cache[-1], batch_slots=slots)
+    h = inner.norm(h)
+    return h, steering.last_steered_norm, steering.last_steered_wst
+
+
 def _emit_compile_status(
-    compiled_inner: Callable[[mx.array], mx.array] | None, B_bucket: int
+    compiled_inner: Callable[..., Any] | None, B_bucket: int
 ) -> None:
     """Ironclad telemetry: whether decode-step mx.compile succeeded for this cache snapshot."""
     sys.stderr.write(
@@ -201,8 +235,12 @@ def _try_compile_inner_step(
     model: Any,
     kv_cache: list[Any],
     steering_wrapper: Any,
-) -> Callable[[mx.array], mx.array] | None:
-    """Compile ``model.model`` only (transformer inner); LM head stays eager.
+) -> Callable[[mx.array, mx.array], tuple[mx.array, mx.array, mx.array]] | None:
+    """Compile decode-step inner (Llama blocks + steering); LM head stays eager.
+
+    ``inner_step(ny, slots)`` threads ``slots`` into the slab read/write graph.
+    ``outputs=`` lists only KV cache buffers mutated in-place; ``(h, norm, wst)``
+    are explicit return values.
 
     Compiled decode is **on** by default; set ``HIVECLAW_COMPILE_DECODE=0`` to disable.
     """
@@ -211,37 +249,61 @@ def _try_compile_inner_step(
     outputs = _kv_compile_output_arrays(kv_cache)
     if len(outputs) < 2:
         return None
-    outputs.append(steering_wrapper.last_steered_norm)
 
-    def inner_step(ny: mx.array) -> mx.array:
-        return model.model(ny, cache=kv_cache)
+    inner = model.model
+
+    def inner_step(ny: mx.array, slots: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+        return _llama_decode_step_inner(
+            inner, kv_cache, steering_wrapper, ny, slots
+        )
 
     try:
         return mx.compile(inner_step, outputs=outputs, shapeless=True)
-    except Exception:
+    except RuntimeError:
         try:
             return mx.compile(inner_step, outputs=outputs, shapeless=False)
-        except Exception:
+        except RuntimeError:
             return None
 
 
 def warmup_compiled_decode(
-    compiled_fn: Callable[[mx.array], mx.array] | None,
+    compiled_fn: Callable[..., Any] | None,
     *,
     B_bucket: int,
     pad_id: int,
+    batch_slots: mx.array | None = None,
 ) -> None:
-    """Run one ``mx.eval`` on a compiled decode fn (set ``HIVECLAW_COMPILE_WARMUP=1`` at startup)."""
+    """Run one ``mx.eval`` on a compiled decode fn (set ``HIVECLAW_COMPILE_WARMUP=1``)."""
     if (
         compiled_fn is None
         or os.environ.get("HIVECLAW_COMPILE_WARMUP", "0") != "1"
     ):
         return
     try:
-        dummy = mx.full((B_bucket, 1), pad_id, dtype=mx.int32)
-        mx.eval(compiled_fn(dummy))
-    except Exception:
+        dummy_y = mx.full((B_bucket, 1), pad_id, dtype=mx.int32)
+        slots = batch_slots
+        if slots is None:
+            slots = mx.full((B_bucket,), -1, dtype=mx.int32)
+        out = compiled_fn(dummy_y, slots)
+        mx.eval(*out)
+    except RuntimeError:
         pass
+
+
+def _ironclad_require_warmup_or_raise(compiled_inner: Any) -> None:
+    if compiled_inner is None:
+        return
+    if os.environ.get("HIVECLAW_CONTINUOUS_BATCH", "0") != "1":
+        return
+    if os.environ.get("HIVECLAW_COMPILE_DECODE", "1") == "0":
+        return
+    if os.environ.get("HIVECLAW_COMPILE_WARMUP", "0") == "1":
+        return
+    raise ValueError(
+        "Ironclad: HIVECLAW_COMPILE_WARMUP=1 is required when "
+        "HIVECLAW_CONTINUOUS_BATCH=1 and HIVECLAW_COMPILE_DECODE=1 (compiled decode active). "
+        "Set HIVECLAW_COMPILE_WARMUP=1 to pre-trace the decode graph before accepting clients."
+    )
 
 
 @dataclass
@@ -458,7 +520,7 @@ def generate_batch_session(
     model.model.layers[-1] = steering
 
     eos_pending: set[int] = set()
-    compiled_inner: Callable[[mx.array], mx.array] | None = None
+    compiled_inner: Callable[..., Any] | None = None
 
     try:
         logits = model(x, cache=cache)
@@ -466,6 +528,13 @@ def generate_batch_session(
         mx.eval(logits)
         compiled_inner = _try_compile_inner_step(model, cache, steering)
         _emit_compile_status(compiled_inner, B_bucket)
+        _ironclad_require_warmup_or_raise(compiled_inner)
+        warmup_compiled_decode(
+            compiled_inner,
+            B_bucket=B_bucket,
+            pad_id=pad_id,
+            batch_slots=batch_slots,
+        )
 
         logits_active = logits[:B_active0]
         t = mx.argmax(logits_active[:, -1, :], axis=-1)
@@ -486,8 +555,17 @@ def generate_batch_session(
             tok_line = tok_line[m_keep0]
             lp0, act0 = rebuild_hive_kv_metadata(entries, B_bucket)
             sync_hive_metadata_to_fa_cache(cache, model, lp0, act0)
+            batch_slots = _build_bucket_slots(entries, B_bucket)
+            object.__setattr__(steering, "current_batch_slots", batch_slots)
             compiled_inner = _try_compile_inner_step(model, cache, steering)
             _emit_compile_status(compiled_inner, B_bucket)
+            _ironclad_require_warmup_or_raise(compiled_inner)
+            warmup_compiled_decode(
+                compiled_inner,
+                B_bucket=B_bucket,
+                pad_id=pad_id,
+                batch_slots=batch_slots,
+            )
 
         B_active = len(entries)
         if B_active == 0:
@@ -519,8 +597,17 @@ def generate_batch_session(
                     break
                 lp1, act1 = rebuild_hive_kv_metadata(entries, B_bucket)
                 sync_hive_metadata_to_fa_cache(cache, model, lp1, act1)
+                batch_slots = _build_bucket_slots(entries, B_bucket)
+                object.__setattr__(steering, "current_batch_slots", batch_slots)
                 compiled_inner = _try_compile_inner_step(model, cache, steering)
                 _emit_compile_status(compiled_inner, B_bucket)
+                _ironclad_require_warmup_or_raise(compiled_inner)
+                warmup_compiled_decode(
+                    compiled_inner,
+                    B_bucket=B_bucket,
+                    pad_id=pad_id,
+                    batch_slots=batch_slots,
+                )
 
             B_active = len(entries)
             if B_active == 0:
@@ -531,16 +618,17 @@ def generate_batch_session(
 
             if compiled_inner is not None:
                 try:
-                    hidden = compiled_inner(next_y)
-                    mx.eval(hidden)
+                    h, norm, wst = compiled_inner(next_y, batch_slots)
+                    mx.eval(h, norm, wst)
+                    h_active = h[:B_active]
                     tie = getattr(getattr(model, "args", None), "tie_word_embeddings", False)
                     if tie:
-                        logits = model.model.embed_tokens.as_linear(hidden)
+                        logits_active = model.model.embed_tokens.as_linear(h_active)
                     else:
-                        logits = model.lm_head(hidden)
-                    mx.eval(logits)
+                        logits_active = model.lm_head(h_active)
+                    mx.eval(logits_active)
                     if os.environ.get("HIVECLAW_TELEMETRY", "1") != "0":
-                        norm_np = np.array(steering.last_steered_norm, dtype=np.float32)
+                        norm_np = np.array(norm, dtype=np.float32)
                         real_slots_np = np.array(batch_slots, dtype=np.int32)
                         Bb = int(batch_slots.shape[0])
                         clamped = [
@@ -561,6 +649,7 @@ def generate_batch_session(
                                 )
                                 + "\n"
                             )
+                            sys.stderr.flush()
                 except RuntimeError as e:
                     compiled_inner = None
                     sys.stderr.write(
@@ -579,12 +668,13 @@ def generate_batch_session(
                     logits = model(next_y, cache=cache)
                     _eval_cache_states(cache)
                     mx.eval(logits)
+                    logits_active = logits[:B_active]
             else:
                 logits = model(next_y, cache=cache)
                 _eval_cache_states(cache)
                 mx.eval(logits)
+                logits_active = logits[:B_active]
 
-            logits_active = logits[:B_active]
             t = mx.argmax(logits_active[:, -1, :], axis=-1)
             mx.eval(t)
             tok_np = np.asarray(t).reshape(-1)
