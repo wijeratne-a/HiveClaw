@@ -2,6 +2,7 @@
 # Full Ironclad verification: SSE burn-in + burn_in.py criteria + zero eager_fallback.
 #
 # Defaults (override with env):
+#   HEALTH_TIMEOUT_S=900         — wait for /health (Phase 7 probe + compile warmup can exceed 300s)
 #   HIVECLAW_MAX_QUEUE_DEPTH=10  — force 503 admission control under load (vs 50 clients)
 #   CONCURRENCY=50
 #   SWAPIN_DELTA_MAX=500000      — realistic macOS unified-memory paging budget for MLX load
@@ -12,6 +13,7 @@
 #   ./scripts/verify_burn_in.sh
 #   PORT=8766 CONCURRENCY=60 ./scripts/verify_burn_in.sh
 #   HIVECLAW_MAX_QUEUE_DEPTH=5 SWAPIN_DELTA_MAX=1000000 ./scripts/verify_burn_in.sh
+#   HEALTH_TIMEOUT_S=1200 ./scripts/verify_burn_in.sh   # very slow cold compile / probe
 #
 # Requires: daemon loaded (make doctor), venv with mlx + httpx, models as for hiveclaw_server.
 set -euo pipefail
@@ -22,6 +24,7 @@ cd "$REPO_ROOT"
 PORT="${PORT:-8080}"
 CONCURRENCY="${CONCURRENCY:-50}"
 SWAPIN_DELTA_MAX="${SWAPIN_DELTA_MAX:-500000}"
+HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-900}"
 LOG="${VERIFY_LOG:-${TMPDIR:-/tmp}/hiveclaw_verify_$$.log}"
 
 if [[ -x "${REPO_ROOT}/.venv/bin/python3" ]]; then
@@ -52,8 +55,8 @@ echo "[verify_burn_in] starting server on 127.0.0.1:${PORT} (max_queue_depth=${H
 "${PYTHON}" scripts/hiveclaw_server.py --host 127.0.0.1 --port "${PORT}" >>"${LOG}" 2>&1 &
 SERVER_PID=$!
 
-echo "[verify_burn_in] waiting for /health ..."
-deadline=$((SECONDS + 300))
+echo "[verify_burn_in] waiting for /health (timeout=${HEALTH_TIMEOUT_S}s) ..."
+deadline=$((SECONDS + HEALTH_TIMEOUT_S))
 while (( SECONDS < deadline )); do
   if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
     break
