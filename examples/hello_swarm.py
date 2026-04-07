@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """
-HiveClaw quickstarts: high-level :class:`LocalSwarm` (daemon + server + SSE) or low-level slab.
+First run (multi-agent via LocalSwarm)::
 
-**Primary (5-line style):** ``LocalSwarm`` bootstraps ``pheromoned`` and spawns ``hiveclaw_server``.
+    python examples/hello_swarm.py
+
+Low-level slab only (no HTTP server)::
+
+    python examples/hello_swarm.py --slab-only
+
+## Prerequisites
+
+Requires **macOS + Apple Silicon**, ``make python``, models + SAE as in ``scripts/README.md``.
+For the default path: ``pip install -r scripts/requirements-server.txt`` (httpx, mlx-lm, FastAPI stack).
+
+**Primary:** :class:`LocalSwarm` bootstraps ``pheromoned`` and spawns ``hiveclaw_server``.
 
 **Low-level:** raw :class:`Swarm` / ``SlabClient`` round-trip (no HTTP).
-
-Requires: macOS + Apple Silicon, ``make python``, models + SAE as in ``scripts/README.md``.
-For ``LocalSwarm``: ``pip install -r scripts/requirements-server.txt`` (httpx, mlx-lm, FastAPI stack).
 """
 
 from __future__ import annotations
@@ -32,7 +40,6 @@ def _run_local_swarm() -> int:
             model="mlx-community/Llama-3.2-1B-Instruct-4bit",
             port=8765,
             build_if_missing=False,
-            # Optional: sae_path="...", or extra_env={"HIVECLAW_SAE_PATH": "...", "HIVECLAW_STIGMERGY": "1"},
         )
         swarm.add_agent(
             slot=1,
@@ -44,8 +51,8 @@ def _run_local_swarm() -> int:
     except Exception as e:
         print(f"[hello_swarm] LocalSwarm failed: {e}", file=sys.stderr)
         print(
-            "Ensure daemon can load (try: hiveclaw_python.init() or make daemon-load) "
-            "and server deps are installed.",
+            "[hello_swarm] If the server or daemon did not start, try:\n"
+            '  python -c "import hiveclaw_python as hc; hc.init()"',
             file=sys.stderr,
         )
         return 1

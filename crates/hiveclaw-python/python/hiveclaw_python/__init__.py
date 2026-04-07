@@ -1,5 +1,18 @@
 import math
 import os
+import platform as _platform
+import sys
+
+if sys.platform != "darwin" or _platform.machine().lower() not in (
+    "arm64",
+    "aarch64",
+):
+    raise NotImplementedError(
+        "HiveClaw Phase 1 is a proof-of-concept tightly integrated with Apple Silicon "
+        "(Metal/IOSurface) to demonstrate zero-copy latent sharing at near-zero coordination cost. "
+        "Full Linux/x86 CPU fallback and CUDA/vLLM support is planned for Phase 2. "
+        "See docs/ARCHITECTURE.md for the roadmap."
+    )
 
 import mlx.core as mx
 import numpy as np

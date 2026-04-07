@@ -1,6 +1,6 @@
 # Intelligence spike (Phase 4A)
 
-**Deep-dive architecture** (IOSurface / XPC, slab v5 layout, SAE geometry, Phase 7 continuous batching, burn-in / ironclad): **[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)**. The repo **[`README.md`](../README.md)** is the product-oriented landing page.
+**Deep-dive architecture** (IOSurface / XPC, slab v5 layout, SAE geometry, Phase 7 continuous batching, burn-in / ironclad): **[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)**. The repo **[`README.md`](../README.md)** is the product-oriented landing page. Terminal demo / hero GIF workflow: **[`examples/hiveclaw_top.py`](../examples/hiveclaw_top.py)** and **[`docs/assets/README.md`](../docs/assets/README.md)**.
 
 ## Canonical workspace (macOS Metal)
 

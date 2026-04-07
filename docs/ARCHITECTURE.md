@@ -4,6 +4,20 @@ This document is the **technical deep dive** for contributors and operators. The
 
 ---
 
+## Terminology (internal names vs industry language)
+
+| Internal / code name | Meaning |
+|---------------------|---------|
+| **`pheromoned`** | **IPC broker daemon** — the macOS background binary that owns the shared memory surface and brokers access (XPC + IOSurface handoff) for client processes. LaunchAgent service id: `com.hiveclaw.pheromoned`. |
+| **Stigmergy** (e.g. `benchmark_stigmergy`, server env `HIVECLAW_STIGMERGY`) | **Latent-cache synchronization** — agents read/write coordination state in shared slab slots instead of sending full text transcripts through a message bus each round. |
+| **IOSurface slab** | **Shared memory pool** — a GPU-accessible buffer split into fixed-size **slots**; agents claim, write, and release slots under daemon supervision. |
+| **SAE latent (256-D bf16)** | **Compressed coordination vector** — a small bfloat16 tensor per slot representing agent/hidden state for steering, avoiding re-tokenizing large chat history for peer sync. |
+| **`eager_fallback`** (server telemetry) | **Compile fallback** — when the optional compiled decode path (`mx.compile`) cannot be used, the server falls back to eager execution and may log this event (burn-in gates watch for unexpected fallback under load). |
+
+User-facing Python APIs should prefer neutral names (**`HiveClawManager`**, **`SlabClient`**, **`LocalSwarm`**) while this document and code retain historical identifiers where renaming would break Mach services, plist paths, or release artifacts.
+
+---
+
 ## High-level stack
 
 - **`pheromoned`** (Rust, macOS LaunchAgent) owns Mach service **`com.hiveclaw.pheromoned`** and brokers **XPC** plus **IOSurface** handoff to clients.

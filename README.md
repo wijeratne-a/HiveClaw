@@ -2,6 +2,10 @@
 
 **Local, hardware-native inference with an OpenAI-compatible API** — run Llama-class models on Apple Silicon without shipping prompts or coordination state to a cloud provider. Multi-agent workflows share state through **inter-process communication** and **shared-memory orchestration** instead of ever-growing chat transcripts.
 
+![HiveClaw demo: JSON coordination vs latent slab timing](docs/assets/demo.gif)
+
+> Multi-agent coordination without the **token tax** of shipping full JSON transcripts every round — data stays on device. *Illustrative animation; run [`examples/hiveclaw_top.py`](examples/hiveclaw_top.py) for a live terminal demo.*
+
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![macOS wheel](https://github.com/wijeratne-a/HiveClaw/actions/workflows/wheel-macos-arm64.yml/badge.svg)](https://github.com/wijeratne-a/HiveClaw/actions/workflows/wheel-macos-arm64.yml)
 [![Ironclad burn-in](https://github.com/wijeratne-a/HiveClaw/actions/workflows/ironclad-burn-in.yml/badge.svg)](https://github.com/wijeratne-a/HiveClaw/actions/workflows/ironclad-burn-in.yml)
@@ -22,6 +26,23 @@ print(resp.choices[0].message.content)
 ```
 
 The server is [`scripts/hiveclaw_server.py`](scripts/hiveclaw_server.py) (packaged as [`hiveclaw_python.openai_server`](crates/hiveclaw-python/python/hiveclaw_python/openai_server.py)).
+
+### Targeted OpenAI API compatibility
+
+HiveClaw implements a **subset** of the OpenAI Chat Completions API — enough for common SDK clients, not a full vendor parity surface.
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `POST /v1/chat/completions` | Yes | Primary endpoint |
+| System / user / assistant messages | Yes | String `content` per message |
+| `max_tokens`, `temperature`, `stream` | Yes | See server request model |
+| SSE streaming (`stream=true`) | Yes | |
+| `GET /v1/models` | Yes | |
+| Function calling / `tools` | No | Planned |
+| JSON mode / `response_format` | No | Planned |
+| `POST /v1/embeddings` | No | Out of scope for Phase 1 |
+
+**Note:** When `HIVECLAW_CONTINUOUS_BATCH=1`, the server may require `stream=true` for chat completions (continuous batching path). Default single-request path supports `stream=false` and `stream=true`.
 
 ## Why local inference matters
 
@@ -102,7 +123,15 @@ swarm.run()
 swarm.stop()
 ```
 
-Wheels: [`.github/workflows/wheel-macos-arm64.yml`](.github/workflows/wheel-macos-arm64.yml). Demos: [`examples/hello_swarm.py`](examples/hello_swarm.py), [`examples/local_swarm_catenar.py`](examples/local_swarm_catenar.py).
+Wheels: [`.github/workflows/wheel-macos-arm64.yml`](.github/workflows/wheel-macos-arm64.yml).
+
+| Example | Purpose |
+|---------|---------|
+| [`examples/hello_swarm.py`](examples/hello_swarm.py) | First run: `LocalSwarm` + optional `--slab-only` |
+| [`examples/hiveclaw_top.py`](examples/hiveclaw_top.py) | Side-by-side terminal demo: JSON vs slab timing (`--mock-only` for screen capture) |
+| [`examples/local_swarm_catenar.py`](examples/local_swarm_catenar.py) | Verifiable execution (Catenar PoT) |
+
+To replace the hero GIF with a recording of the real TUI: `python examples/hiveclaw_top.py --mock-only` (80×24 terminal, dark theme), then convert with [agg](https://github.com/asciinema/agg) or `ffmpeg`. See [`docs/assets/README.md`](docs/assets/README.md).
 
 ## Repository layout
 
