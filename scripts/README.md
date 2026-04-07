@@ -1,5 +1,7 @@
 # Intelligence spike (Phase 4A)
 
+**Deep-dive architecture** (IOSurface / XPC, slab v5 layout, SAE geometry, Phase 7 continuous batching, burn-in / ironclad): **[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)**. The repo **[`README.md`](../README.md)** is the product-oriented landing page.
+
 ## Canonical workspace (macOS Metal)
 
 Use **one** checkout path for all commands and for the **virtualenv** so PyO3, maturin, and MLX never mix binaries across folders.

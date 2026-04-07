@@ -1,98 +1,117 @@
 # HiveClaw
 
-**VRAM-native multi-agent coordination for Apple Silicon** — a Rust daemon (`pheromoned`) exposes a Metal-backed IOSurface slab; Python MLX clients coordinate through **256-D bf16 latents** (SAE space) instead of growing JSON chat logs.
+**Local, hardware-native inference with an OpenAI-compatible API** — run Llama-class models on Apple Silicon without shipping prompts or coordination state to a cloud provider. Multi-agent workflows share state through **inter-process communication** and **shared-memory orchestration** instead of ever-growing chat transcripts.
 
-| Ironclad engine | macOS Metal | License |
-|-----------------|-------------|---------|
-| [Burn-in + zero `eager_fallback`](#ironclad-engine-proof) | IOSurface + XPC | AGPL-3.0 ([`LICENSE`](LICENSE)) |
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![macOS wheel](https://github.com/wijeratne-a/HiveClaw/actions/workflows/wheel-macos-arm64.yml/badge.svg)](https://github.com/wijeratne-a/HiveClaw/actions/workflows/wheel-macos-arm64.yml)
+[![Ironclad burn-in](https://github.com/wijeratne-a/HiveClaw/actions/workflows/ironclad-burn-in.yml/badge.svg)](https://github.com/wijeratne-a/HiveClaw/actions/workflows/ironclad-burn-in.yml)
 
-## What it does
+## Drop-in API (OpenAI SDK)
 
-1. **Shared slab:** Thousands of slots in one IOSurface; agents **claim**, **read/write v5 latents**, and **release** with Mach-era semantics and torn-read protection.
-2. **Steered generation:** Llama-class models run with an SAE tying **2048-D hidden ↔ 256-D slab** so the last layer can inject peer state without re-tokenizing megabytes of chat history.
-3. **Continuous batching (Phase 7):** Optional compiled decode path; [`scripts/verify_burn_in.sh`](scripts/verify_burn_in.sh) gates **zero `eager_fallback`** under concurrent SSE load.
+Point any OpenAI SDK client at the local server. Swap `base_url` — no other code changes.
 
-## Benchmark: coordination without a token tax
+```python
+from openai import OpenAI
 
-> **Sample run (Apple Silicon, Llama 3.2 1B, 5 agents × 10 rounds, 24 tok/turn):** LangChain string baseline — **~97.2%** token tax (`coord / (coord + content)`), **~175.6 s** wall time. HiveClaw latent path — **0%** token tax in this metric, **~45.8 s** wall time (**~3.83×** faster in this harness). **Reproduce:** `python scripts/benchmark_external.py` (see measured table below).
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="local")
+resp = client.chat.completions.create(
+    model="hiveclaw-llama-1b",
+    messages=[{"role": "user", "content": "Summarize this contract."}],
+)
+print(resp.choices[0].message.content)
+```
 
-This harness is a **synthetic committee task**; slab / XPC / SAE work is **not** counted as chat tokens. Numbers vary with machine, thermals, and model.
+The server is [`scripts/hiveclaw_server.py`](scripts/hiveclaw_server.py) (packaged as [`hiveclaw_python.openai_server`](crates/hiveclaw-python/python/hiveclaw_python/openai_server.py)).
 
-### Example measured run (hardware-qualified)
+## Why local inference matters
 
-| Phase | Hardware | `total_wall_ms` | `total_coord_tokens` | `total_content_tokens` | Token tax `coord / (coord + content)` |
-|-------|----------|-----------------|------------------------|--------------------------|----------------------------------------|
-| LangChain string baseline | MacBook Air (Apple Silicon), macOS, Apr 2026 | 175 586 (~175.6 s) | 38 095 | 1 098 | **0.972** |
-| HiveClaw latent path | same | 45 835 (~45.8 s) | 0 | 1 100 | **0.000** |
+- **Data stays on the machine** — workloads run air-gapped: no third-party API calls, no outbound JSON with your prompts to an external vendor. Ideal for regulated and privacy-sensitive environments.
+- **Hardware-native execution** — optimized for **Apple Silicon** and **Metal**; no extra hop through a shared public inference API.
+- **Verifiable output** — optional **generate → verify → repair** quality gates ([`scripts/quality_controller.py`](scripts/quality_controller.py)) enforce policy from YAML profiles ([`scripts/quality_profiles/`](scripts/quality_profiles/)) before downstream code trusts model output — the same *verifiable execution* mindset as the **Aegis Protocol**, applied to shipping systems rather than theory.
 
-Command: **`python scripts/benchmark_external.py`** after `pip install -r scripts/requirements-bench-langchain.txt` and server deps; LangChain phase then HiveClaw phase, defaults above.
+## Performance (sample committee benchmark)
 
-**Wall-clock ratio (LangChain / HiveClaw):** **~3.83×** (175 586 ÷ 45 835). *Coordination token tax* on the LangChain side is **~97.2%** of (coord + content) tokens in this metric; HiveClaw reports **0** coordination tokens under the benchmark’s definition (slab coordination is not counted as chat tokens).
+Synthetic multi-agent task (5 agents × 10 rounds; numbers vary by hardware and model):
 
-Multi-agent “committee” task (5 reviewers × 10 rounds) comparing:
+| Path | Wall time | Coordination tokens |
+|------|-----------|---------------------|
+| LangChain string baseline | ~175.6 s | 38 095 |
+| HiveClaw local | ~45.8 s | 0 |
 
-| Path | Coordination tokens | Content tokens (typical) | Context growth | How to reproduce |
-|------|----------------------|---------------------------|----------------|------------------|
-| **String-passing baseline** | High (prompts include full prior discussion) | Same order | Grows every round | `python scripts/benchmark_consensus.py --no-hiveclaw` |
-| **LangChain string baseline** | Same task/metrics as string baseline; prompts assembled via LangChain | Same order | Grows every round | `pip install -r scripts/requirements-bench-langchain.txt` then `python scripts/benchmark_external.py --no-hiveclaw` |
-| **HiveClaw latent path** | **0** (no text passed between agents) | Same order | ~constant | `python scripts/benchmark_consensus.py` (needs daemon + SAE) |
+Reproduce:
 
-Run [`scripts/benchmark_consensus.py`](scripts/benchmark_consensus.py) on your Mac and paste the printed table into docs or CI artifacts. For an external-framework baseline plus HiveClaw on the same task, run [`scripts/benchmark_external.py`](scripts/benchmark_external.py) (LangChain + optional HiveClaw; prints coordination **token tax**). Internal stigmergy A/B (server on vs off) remains in [`scripts/benchmark_stigmergy.py`](scripts/benchmark_stigmergy.py).
+```bash
+pip install -r scripts/requirements-bench-langchain.txt
+python scripts/benchmark_external.py
+```
 
-## Quick start (5-line style)
+More harnesses: [`scripts/benchmark_consensus.py`](scripts/benchmark_consensus.py), [`scripts/benchmark_stigmergy.py`](scripts/benchmark_stigmergy.py).
 
-From the repo root with venv active, `make python`, `pip install -r scripts/requirements-server.txt`, models + SAE present:
+## Architecture (Phase 1) and roadmap
+
+**Phase 1 (current):** Apple Silicon / macOS proof of concept — OpenAI-compatible **API gateway**, Python **orchestration**, **IPC**-backed shared coordination, **Metal** inference, optional **quality gate**.
+
+```mermaid
+flowchart TD
+    client["Client App (OpenAI SDK)"] --> gateway["OpenAI-Compatible API Gateway"]
+    gateway --> orchestrator["Agent Orchestrator (Python)"]
+    orchestrator --> slab["Shared Memory Slab (IPC)"]
+    slab --> metal["Metal Compute (Apple Silicon)"]
+    orchestrator --> qc["Quality Gate (Verify / Repair)"]
+```
+
+| Phase | Target | Status |
+|-------|--------|--------|
+| 1 | Apple Silicon — Metal, macOS IPC | **Shipped** |
+| 2 | Linux x86 — POSIX shared memory, Docker | Planned |
+| 3 | Multi-node CUDA IPC, NVLink | Planned |
+| 4 | vLLM backend integration | Planned |
+| 5 | Enterprise auth, audit log, SOC 2-oriented hooks | Planned |
+
+**Implementation internals** (slab layout, compile paths, burn-in criteria): see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
+## Quick start
+
+1. Clone the repo and use a single checkout + venv (see [`scripts/README.md`](scripts/README.md)).
+2. Build Python extensions and install server deps:
+
+   ```bash
+   make python
+   pip install -r scripts/requirements-server.txt
+   ```
+
+3. Load the IPC broker (macOS): `make daemon-load` — then `make doctor` to verify.
+4. Start the API gateway:
+
+   ```bash
+   python scripts/hiveclaw_server.py --host 127.0.0.1 --port 8080
+   ```
+
+5. Call it with the OpenAI SDK (example above) or `curl` against `/v1/chat/completions`.
+
+**Full setup, models, troubleshooting:** [`scripts/README.md`](scripts/README.md).
+
+### Optional: Python SDK swarm (no raw HTTP)
 
 ```python
 import hiveclaw_python as hc
+
 swarm = hc.LocalSwarm(model="mlx-community/Llama-3.2-1B-Instruct-4bit")
 swarm.add_agent(slot=1, goal="Say hello in one sentence.")
-swarm.run()  # bootstraps daemon if needed, spawns hiveclaw_server, streams SSE
+swarm.run()
 swarm.stop()
 ```
 
-`LocalSwarm` coordinates agents through **slab latents** (not by shipping full chat logs over HTTP). Use `sae_path=...` for a custom SAE, or pass `extra_env={"HIVECLAW_SAE_PATH": "/path/to.safetensors", ...}` for any `HIVECLAW_*` server knob (`extra_env` is merged first; `model` / `sae_path` win for those two keys).
-
-**Pip / wheel:** macOS arm64 wheels can bundle `pheromoned` (see [`.github/workflows/wheel-macos-arm64.yml`](.github/workflows/wheel-macos-arm64.yml)). The FastAPI server still lives under `scripts/` in the repo — set `HIVECLAW_REPO_ROOT` or pass `repo_root=` so `spawn_server` / `hiveclaw-server` can find `scripts/hiveclaw_server.py`.
-
-Lower-level slab-only example: `python examples/hello_swarm.py --slab-only`. Full stack demo: `python examples/hello_swarm.py`. Stigmergy overseer demo (frozen slot → `inhibit` → agent reroute, no LLM): `python scripts/overseer_demo.py`. **Catenar PoT** with `LocalSwarm`: install [`scripts/requirements-catenar.txt`](scripts/requirements-catenar.txt), run [`examples/local_swarm_catenar.py`](examples/local_swarm_catenar.py) with the verifier up ([Catenar](https://github.com/wijeratne-a/Catenar)).
-
-One-shot daemon bootstrap from Python:
-
-```python
-import hiveclaw_python as hc
-m = hc.init(build_if_missing=True)   # install LaunchAgent + launchctl bootstrap
-proc = m.spawn_server(port=8080)     # optional: background hiveclaw_server
-# ... use httpx against http://127.0.0.1:8080 ...
-proc.terminate()
-```
-
-## How it works (IOSurface / Metal / XPC)
-
-- **`pheromoned`** (LaunchAgent) owns the Mach service **`com.hiveclaw.pheromoned`** and brokers **XPC** + **IOSurface** handoff to clients.
-- The slab layout is versioned (v5: **640 B/slot**, **256×bf16** payload, epoch words for torn-read detection). Python uses **`hiveclaw_python.SlabClient`** (`read_slot_v5`, `write_slot_v5`, batched variants, `claim_task` / `release_task`).
-- **Metal** paths in `hiveclaw_mlx` can accelerate batched slab traffic; default integration tests still validate CPU-side correctness.
-- **No central JSON router** is required for peer state: the “sentinel” is the shared surface + SAE geometry, not a Redis topic.
-
-See [`scripts/README.md`](scripts/README.md) for setup, `make daemon-load`, and troubleshooting (`launchctl` EIO from IDE terminals).
-
-## Ironclad engine proof
-
-The repo ships an exit-0 gate intended for a **local Apple Silicon Mac** with GUI `launchctl`, MLX weights, and the default SAE:
-
-```bash
-bash scripts/ci_ironclad_verify.sh
-```
-
-This runs **`make doctor`** (daemon path + `SlabClient` handshake) then **[`scripts/verify_burn_in.sh`](scripts/verify_burn_in.sh)** — SSE load, **`burn_in.py`** criteria (including HTTP 503 under overload), and **zero** `eager_fallback` JSON events on the server log. Phase 7 defaults compile the inner decode step when **`HIVECLAW_COMPILE_DECODE=1`** and **`HIVECLAW_COMPILE_WARMUP=1`**.
-
-Optional GitHub Actions workflow: [`.github/workflows/ironclad-burn-in.yml`](.github/workflows/ironclad-burn-in.yml) (typically needs self-hosted macOS).
+Wheels: [`.github/workflows/wheel-macos-arm64.yml`](.github/workflows/wheel-macos-arm64.yml). Demos: [`examples/hello_swarm.py`](examples/hello_swarm.py), [`examples/local_swarm_catenar.py`](examples/local_swarm_catenar.py).
 
 ## Repository layout
 
-- **`crates/hiveclaw-daemon`** — `pheromoned` binary and XPC surface broker.
-- **`crates/hiveclaw-python`** — PyO3 + **`hiveclaw_python`** (SlabClient, `HiveClawManager`, `init`, `LocalSwarm`, `Swarm`). Console script **`hiveclaw-server`** runs the server from a checkout (`HIVECLAW_REPO_ROOT` or auto-detected repo root).
-- **`scripts/`** — MLX spikes, [`hiveclaw_server.py`](scripts/hiveclaw_server.py) (OpenAI-compatible API + continuous batching), benchmarks, burn-in.
+| Path | Role |
+|------|------|
+| [`crates/hiveclaw-daemon`](crates/hiveclaw-daemon) | **IPC broker daemon** (`pheromoned`) |
+| [`crates/hiveclaw-python`](crates/hiveclaw-python) | **Python SDK + OpenAI server** (`hiveclaw_python`, `hiveclaw-server`) |
+| [`scripts/`](scripts/) | **Benchmarks, quality gate, demos, burn-in** |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | **Deep-dive architecture** |
 
 ## Licensing
 
