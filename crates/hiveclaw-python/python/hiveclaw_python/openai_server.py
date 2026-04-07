@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import json
+import logging
 import os
 import random
 import sys
@@ -54,6 +55,33 @@ def _sae_path() -> Path:
 MAX_CONCURRENT = 1
 MAX_CANDIDATE_SLOTS = 512
 DEFAULT_MODEL_NAME = "hiveclaw-llama-1b"
+
+_logger = logging.getLogger(__name__)
+
+
+def _cursor_model_alias() -> str:
+    v = os.environ.get("HIVECLAW_CURSOR_MODEL_ALIAS", "hiveclaw-swarm-8b")
+    v = (v or "").strip()
+    return v if v else "hiveclaw-swarm-8b"
+
+
+def _response_model_name(requested: str | None) -> str:
+    """Echo the client model id when provided; otherwise canonical default."""
+    if requested is None:
+        return DEFAULT_MODEL_NAME
+    s = str(requested).strip()
+    return s if s else DEFAULT_MODEL_NAME
+
+
+def _model_id_allowed_for_hiveclaw(model: str | None) -> bool:
+    """Cursor may send DEFAULT_MODEL_NAME, HIVECLAW_CURSOR_MODEL_ALIAS, or any hiveclaw-* id."""
+    if model is None or not str(model).strip():
+        return True
+    s = str(model).strip()
+    if s == DEFAULT_MODEL_NAME or s == _cursor_model_alias():
+        return True
+    return s.lower().startswith("hiveclaw-")
+
 
 # Serialize all MLX + layer-swap work (executor thread vs stream worker thread).
 _MLX_LOCK = threading.Lock()
@@ -278,6 +306,44 @@ def _sync_chat_completion_unlocked(
     if not goal_text.strip():
         raise ValueError("no user/content text for goal latent")
 
+    model_name_out = _response_model_name(body.model)
+    if not _model_id_allowed_for_hiveclaw(body.model):
+        _logger.info(
+            "chat.completions model id %r is not a hiveclaw-* id; proceeding",
+            body.model,
+        )
+
+    if ctx.stigmergy_enabled and os.environ.get("HIVECLAW_TWO_AGENT", "0") == "1":
+        from .swarm_agents import two_agent_pipeline
+
+        content, n_comp = two_agent_pipeline(ctx, body, msgs)
+        cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(time.time())
+        prompt_ids = tokenizer.encode(
+            tokenizer.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=True
+            )
+        )
+        usage = {
+            "prompt_tokens": len(prompt_ids),
+            "completion_tokens": int(n_comp),
+            "total_tokens": len(prompt_ids) + int(n_comp),
+        }
+        return {
+            "id": cid,
+            "object": "chat.completion",
+            "created": created,
+            "model": model_name_out,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": usage,
+        }
+
     encoded = _encode_messages(tokenizer, msgs)
     steering: ActiveSteeringWrapper | None = None
     slot = -1
@@ -349,7 +415,7 @@ def _sync_chat_completion_unlocked(
         "id": cid,
         "object": "chat.completion",
         "created": created,
-        "model": body.model or DEFAULT_MODEL_NAME,
+        "model": model_name_out,
         "choices": [
             {
                 "index": 0,
@@ -383,6 +449,67 @@ def _sync_stream_chunks_unlocked(
     if not goal_text.strip():
         raise ValueError("no user/content text for goal latent")
 
+    if not _model_id_allowed_for_hiveclaw(body.model):
+        _logger.info(
+            "chat.completions stream model id %r is not hiveclaw-*; proceeding",
+            body.model,
+        )
+
+    model_name = _response_model_name(body.model)
+    prompt_ids = tokenizer.encode(
+        tokenizer.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True
+        )
+    )
+
+    two_agent = ctx.stigmergy_enabled and os.environ.get(
+        "HIVECLAW_TWO_AGENT", "0"
+    ) == "1"
+
+    cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    created = int(time.time())
+
+    def chunk(
+        delta: dict[str, Any],
+        finish: str | None = None,
+        usage: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "id": cid,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model_name,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        }
+        if usage is not None:
+            out["usage"] = usage
+        return out
+
+    # Immediate TTFT: first SSE payload before claim / generation (Cursor-friendly).
+    yield chunk({"role": "assistant", "content": ""})
+
+    if os.environ.get("HIVECLAW_SHOW_THINKING", "0") == "1" and two_agent:
+        yield chunk({"content": "*[HiveClaw swarm active...]*\n\n"})
+
+    if two_agent:
+        from .swarm_agents import iter_two_agent_stream_chunks
+
+        n_done = [0]
+        try:
+            for piece in iter_two_agent_stream_chunks(
+                ctx, body, msgs, chunk, completion_count=n_done
+            ):
+                yield piece
+            usage = {
+                "prompt_tokens": len(prompt_ids),
+                "completion_tokens": int(n_done[0]),
+                "total_tokens": len(prompt_ids) + int(n_done[0]),
+            }
+            yield chunk({}, finish="stop", usage=usage)
+        finally:
+            model.model.layers[-1] = ctx.original_layer
+        return
+
     encoded = _encode_messages(tokenizer, msgs)
     steering: ActiveSteeringWrapper | None = None
     slot = -1
@@ -410,23 +537,10 @@ def _sync_stream_chunks_unlocked(
     sampler = make_sampler(temp=temp)
     eos_id = int(tokenizer.eos_token_id) if tokenizer.eos_token_id is not None else -1
 
-    cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    created = int(time.time())
-    model_name = body.model or DEFAULT_MODEL_NAME
-
-    def chunk(delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
-        return {
-            "id": cid,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model_name,
-            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-        }
-
+    n_completion = 0
     try:
         if steering is not None:
             object.__setattr__(steering, "current_slot", slot)
-        yield chunk({"role": "assistant", "content": ""})
         for token, _ in generate_step(
             encoded,
             model,
@@ -435,10 +549,16 @@ def _sync_stream_chunks_unlocked(
         ):
             tok_id = int(token.item()) if hasattr(token, "item") else int(token)
             text = tokenizer.decode([tok_id])
+            n_completion += 1
             yield chunk({"content": text})
             if eos_id >= 0 and tok_id == eos_id:
                 break
-        yield chunk({}, finish="stop")
+        usage = {
+            "prompt_tokens": len(prompt_ids),
+            "completion_tokens": n_completion,
+            "total_tokens": len(prompt_ids) + n_completion,
+        }
+        yield chunk({}, finish="stop", usage=usage)
     finally:
         model.model.layers[-1] = ctx.original_layer
         if steering is not None and slot >= 0:
@@ -564,17 +684,25 @@ async def v1_slots(request: Request) -> dict[str, Any]:
 @app.get("/v1/models")
 async def list_models() -> dict[str, Any]:
     """OpenAI-compatible model list (Cursor and SDKs probe this before chat)."""
-    return {
-        "object": "list",
-        "data": [
+    alias = _cursor_model_alias()
+    data: list[dict[str, Any]] = [
+        {
+            "id": DEFAULT_MODEL_NAME,
+            "object": "model",
+            "created": 0,
+            "owned_by": "hiveclaw",
+        }
+    ]
+    if alias != DEFAULT_MODEL_NAME:
+        data.append(
             {
-                "id": DEFAULT_MODEL_NAME,
+                "id": alias,
                 "object": "model",
                 "created": 0,
                 "owned_by": "hiveclaw",
             }
-        ],
-    }
+        )
+    return {"object": "list", "data": data}
 
 
 async def _chat_completions_batched_stream(
@@ -618,7 +746,7 @@ async def _chat_completions_batched_stream(
 
     await loop.run_in_executor(None, ctx.master_queue.put, job)
 
-    model_name = body.model or DEFAULT_MODEL_NAME
+    model_name = _response_model_name(body.model)
     created = int(time.time())
     cid0 = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
@@ -668,6 +796,14 @@ async def chat_completions(request: Request, body: ChatCompletionRequest):
     executor: concurrent.futures.ThreadPoolExecutor = request.app.state.executor
     loop = asyncio.get_running_loop()
 
+    ua = (request.headers.get("user-agent") or "").lower()
+    if "cursor" in ua and not body.stream and not getattr(
+        request.app.state, "continuous_batch", False
+    ):
+        _logger.warning(
+            "Cursor client sent stream=false on non-batch path; proceeding anyway"
+        )
+
     if getattr(request.app.state, "continuous_batch", False):
         if not body.stream:
             raise HTTPException(
@@ -681,11 +817,16 @@ async def chat_completions(request: Request, body: ChatCompletionRequest):
         async def event_gen() -> AsyncIterator[dict[str, str]]:
             q: asyncio.Queue = asyncio.Queue()
             loop_ref = asyncio.get_running_loop()
+            use_keepalive = ctx.stigmergy_enabled and os.environ.get(
+                "HIVECLAW_TWO_AGENT", "0"
+            ) == "1"
 
             def worker() -> None:
                 try:
                     for item in _sync_stream_chunks(ctx, body):
-                        fut = asyncio.run_coroutine_threadsafe(q.put(("chunk", item)), loop_ref)
+                        fut = asyncio.run_coroutine_threadsafe(
+                            q.put(("chunk", item)), loop_ref
+                        )
                         fut.result(timeout=600)
                     fut = asyncio.run_coroutine_threadsafe(q.put(("done", None)), loop_ref)
                     fut.result(timeout=30)
@@ -696,7 +837,14 @@ async def chat_completions(request: Request, body: ChatCompletionRequest):
                 t = threading.Thread(target=worker, daemon=True)
                 t.start()
                 while True:
-                    kind, payload = await q.get()
+                    if use_keepalive:
+                        try:
+                            kind, payload = await asyncio.wait_for(q.get(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            yield {"comment": "hiveclaw-keepalive"}
+                            continue
+                    else:
+                        kind, payload = await q.get()
                     if kind == "done":
                         yield {"data": "[DONE]"}
                         break

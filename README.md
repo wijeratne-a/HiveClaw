@@ -60,8 +60,8 @@ HiveClaw implements a **subset** of the OpenAI Chat Completions API — enough f
 | `POST /v1/chat/completions` | Yes | Primary endpoint |
 | System / user / assistant messages | Yes | String `content` per message |
 | `max_tokens`, `temperature`, `stream` | Yes | See server request model |
-| SSE streaming (`stream=true`) | Yes | |
-| `GET /v1/models` | Yes | |
+| SSE streaming (`stream=true`) | Yes | Final chunk includes `usage` (non-batch + continuous batch) |
+| `GET /v1/models` | Yes | Lists `hiveclaw-llama-1b` and `HIVECLAW_CURSOR_MODEL_ALIAS` (default `hiveclaw-swarm-8b`) |
 | Function calling / `tools` | No | Planned |
 | JSON mode / `response_format` | No | Planned |
 | `POST /v1/embeddings` | No | Out of scope for Phase 1 |
@@ -137,6 +137,37 @@ flowchart TD
 **Daemon lifecycle:** On the normal path you should not need manual `launchctl` commands. `hc.init()` / `LocalSwarm` coordinates the broker and server subprocess flow; use [`scripts/README.md`](scripts/README.md) when debugging `pheromoned` or a stuck GUI session.
 
 **Full setup, models, troubleshooting:** [`scripts/README.md`](scripts/README.md).
+
+## Drop-in Cursor IDE Integration (free local multi-agent)
+
+Run HiveClaw as a fully local OpenAI-compatible backend for Cursor. No API keys. No token costs.
+
+1. Start the server:
+
+   ```bash
+   HIVECLAW_TWO_AGENT=1 hiveclaw-server --host 127.0.0.1 --port 8080
+   ```
+
+2. Open Cursor → **Settings → Models → + Add Model**.
+3. Set **Base URL** to `http://127.0.0.1:8080/v1`.
+4. Add model name **`hiveclaw-swarm-8b`** (or match `HIVECLAW_CURSOR_MODEL_ALIAS` if you override it).
+5. Verify with the smoke test below before relying on Composer.
+
+### Smoke test
+
+```bash
+curl -s http://127.0.0.1:8080/v1/models | python3 -m json.tool
+```
+
+### Advanced: memory and VRAM monitoring
+
+```bash
+# macOS — sample swap pressure while Composer runs (adjust paths to your checkout)
+vm_stat 1 &
+python scripts/burn_in.py --base-url http://127.0.0.1:8080 --concurrency 1
+```
+
+Projected savings vs cloud models: [`tools/roi_calculator.py`](tools/roi_calculator.py). Cursor-oriented benchmark harness: [`benchmarks/cursor_simulation.py`](benchmarks/cursor_simulation.py).
 
 ### Optional: Python SDK swarm (no raw HTTP)
 

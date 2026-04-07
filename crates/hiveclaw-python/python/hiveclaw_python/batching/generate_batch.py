@@ -351,6 +351,25 @@ def _openai_chunk(
     }
 
 
+def _openai_chunk_final_usage(e: ChatBatchEntry) -> dict[str, Any]:
+    """Last SSE chunk before [DONE]: finish_reason + token usage (OpenAI / Cursor compatible)."""
+    pl = int(e.prompt_tokens.shape[0])
+    ce = int(e.tokens_emitted)
+    usage = {
+        "prompt_tokens": pl,
+        "completion_tokens": ce,
+        "total_tokens": pl + ce,
+    }
+    return {
+        "id": e.completion_id,
+        "object": "chat.completion.chunk",
+        "created": e.created,
+        "model": e.model_name,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "usage": usage,
+    }
+
+
 def release_entry_slab(slab_client: Any, e: ChatBatchEntry) -> None:
     if e.released:
         return
@@ -419,7 +438,7 @@ def _evict_indices(
             push_openai_chunk(
                 e.loop,
                 e.client_queue,
-                _openai_chunk(e, {}, finish="stop"),
+                _openai_chunk_final_usage(e),
             )
             push_done(e.loop, e.client_queue)
             e.done_enqueued = True
@@ -764,7 +783,11 @@ def batch_jobs_to_entries(ctx: Any, jobs: list[BatchedStreamJob]) -> list[ChatBa
         prompt_tokens = srv._encode_messages(ctx.tokenizer, msgs)
         cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
-        model_name = getattr(job.body, "model", None) or srv.DEFAULT_MODEL_NAME
+        rm = getattr(job.body, "model", None)
+        if hasattr(srv, "_response_model_name"):
+            model_name = srv._response_model_name(rm)
+        else:
+            model_name = rm or srv.DEFAULT_MODEL_NAME
         eos_id = (
             int(ctx.tokenizer.eos_token_id)
             if ctx.tokenizer.eos_token_id is not None

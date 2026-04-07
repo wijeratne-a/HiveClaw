@@ -355,6 +355,8 @@ curl -N -X POST http://127.0.0.1:8080/v1/chat/completions \
 
 Optional body fields: **`temperature`** (default `0.8`), **`alpha`** steering strength (default `0.1`, matches `hiveclaw_steering`).
 
+**Cursor / model listing:** Set **`HIVECLAW_CURSOR_MODEL_ALIAS`** (default **`hiveclaw-swarm-8b`**) so `/v1/models` advertises the model name users type in Cursor while the server keeps **`hiveclaw-llama-1b`** as the canonical id. Any request **`model`** id matching that alias, the canonical name, or a string starting with **`hiveclaw-`** is accepted. Related: **`HIVECLAW_TWO_AGENT=1`** enables the Coder+Reviewer pipeline ([`hiveclaw_python/swarm_agents.py`](../crates/hiveclaw-python/python/hiveclaw_python/swarm_agents.py)); **`HIVECLAW_TWO_AGENT_CODER_SLOT`** / **`HIVECLAW_TWO_AGENT_REVIEWER_SLOT`** (defaults **0** / **1**) pin slab slots; **`HIVECLAW_SHOW_THINKING=1`** emits an optional status chunk before swarm work in streaming mode.
+
 ### Client `base_url`
 
 Use **`http://127.0.0.1:8080/v1`** as the OpenAI-compatible base URL for LangChain / OpenAI SDKs.
