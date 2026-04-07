@@ -29,7 +29,7 @@ def load_sae(sae_path: Path) -> dict[str, mx.array]:
     if not sae_path.is_file():
         print(
             f"[ERROR] Missing SAE weights at {sae_path}. "
-            "Run scripts/harvester.py then scripts/train_sae.py.",
+            "Run training/harvester.py then training/train_sae.py.",
             file=sys.stderr,
         )
         sys.exit(1)

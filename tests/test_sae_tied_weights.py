@@ -16,7 +16,7 @@ SAE_PATH = REPO_ROOT / "models/hiveclaw_sae_v1.safetensors"
 
 def main() -> int:
     if not SAE_PATH.is_file():
-        print(f"FAIL: missing {SAE_PATH} (run scripts/train_sae.py)", file=sys.stderr)
+        print(f"FAIL: missing {SAE_PATH} (run training/train_sae.py)", file=sys.stderr)
         return 1
 
     mx.random.seed(42)

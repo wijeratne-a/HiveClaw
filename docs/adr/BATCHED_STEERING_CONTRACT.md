@@ -10,7 +10,7 @@ Single-slot `read_slot_v5` / `write_slot_v5` limit throughput when many agents n
 
 ## Normative math
 
-**Source of truth:** [`scripts/hiveclaw_steering.py`](../../scripts/hiveclaw_steering.py). Markdown narrative (e.g. `PR2_NEXT.md`) is non-normative if it conflicts with that file.
+**Source of truth:** [`hiveclaw_python/steering.py`](../../crates/hiveclaw-python/python/hiveclaw_python/steering.py) (repo shims under `scripts/hiveclaw_steering.py` re-export this module). Markdown narrative (e.g. `PR2_NEXT.md`) is non-normative if it conflicts with that file.
 
 ## Phase 1.1–1.2 — Metal, bindings, `depends`
 
@@ -107,14 +107,14 @@ Batched primitives live in `crates/hiveclaw-mlx/src/slab_primitives.cpp` and hea
 
 ## Phase 7 — Continuous batching engine (accepted)
 
-**Code:** [`scripts/generate_batch.py`](../../scripts/generate_batch.py), [`scripts/hiveclaw_server.py`](../../scripts/hiveclaw_server.py) (`HIVECLAW_CONTINUOUS_BATCH=1`), [`scripts/hiveclaw_steering.py`](../../scripts/hiveclaw_steering.py) (Steering Sandwich).
+**Code:** [`hiveclaw_python/batching/generate_batch.py`](../../crates/hiveclaw-python/python/hiveclaw_python/batching/generate_batch.py), `hiveclaw-server` / [`server_main.py`](../../crates/hiveclaw-python/python/hiveclaw_python/server_main.py) (`HIVECLAW_CONTINUOUS_BATCH=1`), [`hiveclaw_python/steering.py`](../../crates/hiveclaw-python/python/hiveclaw_python/steering.py) (Steering Sandwich).
 
 ### Per-step invariant
 
 1. **Evaluation and eviction (top of step, before `model()`):** Check disconnect flags and queue-full conditions. Eviction is **atomic**: stop sending to client queue → slice Python trackers (`B_active`, `M_keep`) → `release_task`. MLX and the slab **never** touch a released slot in the same step.
 2. **EOS:** EOS is observed **after** logits; eviction for that row runs at **next** step top (client still receives the EOS token).
 3. **Bucketing (no shrinking):** On first forward of a session, `B_bucket = min(32, next_pow2(B_active_initial))`. If `B_active` shrinks, **`B_bucket` never shrinks** until the batch drains to zero. Prefer masked dummy FLOPs over recompile.
-4. **Dummy rows:** `pad_token_id` (or EOS if undefined). **Attention:** [`HiveClawKVCache`](../../scripts/hiveclaw_kv_mask.py) (installed on the full-attention cache slot) applies an **additive float16 mask** (`-1e4` on masked positions) so dummy rows are **fully blinded** in SDPA on prefill and decode; real rows also mask **left-padded** key columns. Shared KV length across the batch tensor is unchanged. **Steering sandwich** still pads dummies with zeros before the LM head.
+4. **Dummy rows:** `pad_token_id` (or EOS if undefined). **Attention:** [`HiveClawKVCache`](../../crates/hiveclaw-python/python/hiveclaw_python/batching/kv_mask.py) (installed on the full-attention cache slot) applies an **additive float16 mask** (`-1e4` on masked positions) so dummy rows are **fully blinded** in SDPA on prefill and decode; real rows also mask **left-padded** key columns. Shared KV length across the batch tensor is unchanged. **Steering sandwich** still pads dummies with zeros before the LM head.
 5. **Steering Sandwich (before LM head):** Full-bucket static shape — no `[:B_active]` slice on the batch axis. `batch_slots` is **`[B_bucket]` int32** with **`-1`** sentinel for dummy rows (C++ `0xFFFFFFFF`: read zeros / write no-op). On `H_orig [B_bucket,1,2048]`: **(a)** `read_slots(batch_slots, depends=H_orig)` (full bucket); **torn** rows → zero scents; decode, L2 clamp; **(b)** **active mask** `(batch_slots != -1)` zeroes delta on dummies; **(c)** **Sandwich Gate:** `H_steered` is the steered hidden for real rows and **exact zeros** for dummies (before LM head); **(d)** optional `write_slots` over full bucket (sentinel rows no-op in C++). **(e)** LM head / logits: compile boundary ends at transformer inner; **`logits[:B_active]`** is taken in Python on the eager logits tensor. **`last_steered_norm`:** sidecar **`[B_bucket,1,1]`** float32 on `BatchedSteeringWrapper` for host telemetry (`poison_clamp_batch`) after compiled decode steps.
 6. **P95 latency:** Server-side only (time between successive generated tokens for a row); excludes SSE network.
 

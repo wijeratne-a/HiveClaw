@@ -1,8 +1,9 @@
 # HiveClaw — Phase 4: XPC Mach service + IOSurface + PyO3.
-.PHONY: build build-release poc clean test-ipc python python-clean python-check-maturin spike-deps daemon-load daemon-unload daemon-uninstall daemon-status doctor
+.PHONY: build build-release poc clean test-ipc python python-clean python-check-maturin spike-deps daemon-load daemon-unload daemon-uninstall daemon-status doctor check-plist
 
 ROOT := $(abspath .)
 PBIN := $(ROOT)/target/release/pheromoned
+PLIST_TEMPLATE := $(ROOT)/crates/hiveclaw-daemon/data/com.hiveclaw.pheromoned.plist.in
 GEN_PLIST := $(ROOT)/com.hiveclaw.pheromoned.gen.plist
 # launchctl often returns EIO (error 5) when bootstrapping a plist from an arbitrary repo path; install under ~/Library/LaunchAgents/ (Apple convention).
 LAUNCH_AGENTS := $(HOME)/Library/LaunchAgents
@@ -91,7 +92,7 @@ python: spike-deps python-check-maturin
 daemon-load: build-release
 	@test -f "$(PBIN)" || (echo "missing $(PBIN); run: cargo build --release -p hiveclaw-daemon" && exit 1)
 	mkdir -p "$(LAUNCH_AGENTS)"
-	sed "s|@PROGRAM@|$(PBIN)|g" "$(ROOT)/com.hiveclaw.pheromoned.plist.in" > "$(INSTALLED_PLIST)"
+	sed "s|@PROGRAM@|$(PBIN)|g" "$(PLIST_TEMPLATE)" > "$(INSTALLED_PLIST)"
 	chmod 644 "$(INSTALLED_PLIST)"
 	cp "$(INSTALLED_PLIST)" "$(GEN_PLIST)"
 	-launchctl bootout $(HIVECLAW_GUI_DOMAIN) com.hiveclaw.pheromoned 2>/dev/null || true
@@ -117,6 +118,12 @@ daemon-load: build-release
 			exit 1; \
 		fi; \
 	fi
+
+# Wheel ships a copy under hiveclaw_python/data — must match the daemon crate template.
+check-plist:
+	@cmp -s "$(PLIST_TEMPLATE)" "$(ROOT)/crates/hiveclaw-python/python/hiveclaw_python/data/com.hiveclaw.pheromoned.plist.in" || \
+	  (echo >&2 "Plist drift: sync crates/hiveclaw-daemon/data/com.hiveclaw.pheromoned.plist.in to crates/hiveclaw-python/python/hiveclaw_python/data/"; exit 1)
+	@echo "OK: plist templates match."
 
 doctor:
 	@"$(MATURIN_PYTHON)" "$(ROOT)/scripts/hiveclaw_doctor.py" "$(ROOT)" "$(PBIN)"

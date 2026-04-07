@@ -20,20 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 
-def _ensure_scripts_on_path() -> None:
-    try:
-        from .init import find_repo_root
-
-        d = find_repo_root() / "scripts"
-        s = str(d)
-        if s not in sys.path:
-            sys.path.insert(0, s)
-    except RuntimeError:
-        pass
-
-
-_ensure_scripts_on_path()
-
 import mlx.core as mx
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
@@ -480,7 +466,7 @@ async def lifespan(app: FastAPI):
     continuous = os.environ.get("HIVECLAW_CONTINUOUS_BATCH", "0") == "1"
     app.state.continuous_batch = continuous
     if continuous:
-        from generate_batch import probe_max_batch, start_swarm_batch_worker
+        from .batching.generate_batch import probe_max_batch, start_swarm_batch_worker
 
         ctx.max_client_queue_depth = int(
             os.environ.get("HIVECLAW_MAX_QUEUE_DEPTH", "50")
@@ -595,7 +581,7 @@ async def _chat_completions_batched_stream(
     request: Request, body: ChatCompletionRequest
 ) -> EventSourceResponse:
     """Phase 7: enqueue to ``swarm_batch_worker``; stream from per-client asyncio.Queue."""
-    from generate_batch import BatchedStreamJob
+    from .batching.generate_batch import BatchedStreamJob
 
     ctx: ServerContext = request.app.state.ctx
     if ctx.master_queue is None:

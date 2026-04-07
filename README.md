@@ -47,7 +47,7 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-The server is [`scripts/hiveclaw_server.py`](scripts/hiveclaw_server.py) (packaged as [`hiveclaw_python.openai_server`](crates/hiveclaw-python/python/hiveclaw_python/openai_server.py)).
+Run the gateway with **`hiveclaw-server`** or **`python -m hiveclaw_python.server_main`** (implementation: [`hiveclaw_python.openai_server`](crates/hiveclaw-python/python/hiveclaw_python/openai_server.py); `scripts/hiveclaw_server.py` is a thin compatibility shim).
 
 ### Targeted OpenAI API compatibility
 
@@ -127,7 +127,7 @@ flowchart TD
 4. Start the API gateway:
 
    ```bash
-   python scripts/hiveclaw_server.py --host 127.0.0.1 --port 8080
+   hiveclaw-server --host 127.0.0.1 --port 8080
    ```
 
 5. Call it with the OpenAI SDK (example above) or `curl` against `/v1/chat/completions`.
@@ -169,7 +169,8 @@ To replace the hero GIF with a recording of the real TUI: `python examples/hivec
 | [`quality_gate/`](quality_gate/) | Importable quality controller, checks, and YAML profiles. |
 | [`requirements/`](requirements/) | Pinned optional dependency sets (`requirements-server.txt`, spike, bench, …). |
 | [`internal/spikes/`](internal/spikes/) | Unsupported research demos (see [`internal/spikes/README.md`](internal/spikes/README.md)). |
-| [`scripts/`](scripts/) | Server shim, doctor, burn-in, verify, dashboards, training/harvest — runtime tooling kept beside the daemon workflow. |
+| [`scripts/`](scripts/) | Doctor, burn-in, verify, dev shims — automation beside the daemon workflow. |
+| [`training/`](training/) | Optional SAE harvest + train scripts (`harvester.py`, `train_sae.py`). |
 | [`crates/hiveclaw-daemon`](crates/hiveclaw-daemon) | IPC broker (`pheromoned`). |
 | [`crates/hiveclaw-python`](crates/hiveclaw-python) | Python SDK + OpenAI server package (`hiveclaw_python`). |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Deep-dive architecture. |

@@ -50,7 +50,13 @@ class HiveClawManager:
         self.teardown = bool(teardown)
         self._pheromoned = self._resolve_pheromoned_binary()
         self._doctor = self.repo_root / "scripts" / "hiveclaw_doctor.py"
-        self._plist_template = self.repo_root / "com.hiveclaw.pheromoned.plist.in"
+        self._plist_template = (
+            self.repo_root
+            / "crates"
+            / "hiveclaw-daemon"
+            / "data"
+            / "com.hiveclaw.pheromoned.plist.in"
+        )
         self._launch_agents = Path.home() / "Library" / "LaunchAgents"
         self._installed_plist = self._launch_agents / "com.hiveclaw.pheromoned.plist"
 
@@ -221,17 +227,9 @@ class HiveClawManager:
         timeout_s: float = 300.0,
     ) -> subprocess.Popen:
         """
-        Start ``scripts/hiveclaw_server.py``; wait until ``/health`` responds.
+        Start ``python -m hiveclaw_python.server_main``; wait until ``/health`` responds.
         Caller must ``terminate()`` the process when done.
         """
-        srv = self.repo_root / "scripts" / "hiveclaw_server.py"
-        if not srv.is_file():
-            raise FileNotFoundError(
-                f"{srv} not found. The chat server ships in the HiveClaw repo under scripts/. "
-                "Set repo_root to your checkout, or set HIVECLAW_REPO_ROOT and run "
-                "`hiveclaw-server` / `python -m hiveclaw_python.server_main`."
-            )
-
         child_env = os.environ.copy()
         child_env["HIVECLAW_REPO_ROOT"] = str(self.repo_root)
         if continuous_batch:
@@ -244,7 +242,8 @@ class HiveClawManager:
 
         cmd = [
             self.python_exe,
-            str(srv),
+            "-m",
+            "hiveclaw_python.server_main",
             "--host",
             "127.0.0.1",
             "--port",
@@ -274,7 +273,7 @@ class HiveClawManager:
         while time.time() < deadline:
             if proc.poll() is not None:
                 raise RuntimeError(
-                    f"hiveclaw_server exited early (code={proc.returncode}); "
+                    f"hiveclaw server process exited early (code={proc.returncode}); "
                     "check daemon, models, and SAE (see scripts/README.md)."
                 )
             try:

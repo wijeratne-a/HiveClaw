@@ -22,27 +22,27 @@ cd ~/dev/HiveClaw
 
 The PyO3 client handshakes with **`cmd=get_surface_v5`**; the daemon replies with **`surface_id`**, **`magic_version`** (`0x48434C5700000005`), and optional identity strings **`daemon_exe`** (absolute path of `pheromoned`) and **`daemon_crate_version`** (hiveclaw-daemon crate version). Any other command (including legacy surface handshakes) receives **`error`** = **`INVALID_COMMAND_OR_UNSUPPORTED_VERSION`**.
 
-**Layout:** global header **4096** bytes (magic `u64` @ 0, version `u32` @ 8, `n_slots` @ 12, `stride` @ 16). Each slot is **640** bytes: 64-byte header (`slot_state`, Mach `last_claim`, `front_epoch`), **256×bf16** payload (512 B), 64-byte footer with **`back_epoch` at +576** from slot base. Writers bump **`front_epoch`**, copy **512** B, set **`back_epoch`**. **`read_slot_v5` / `WriteSlab`** enforce torn detection (zeros on mismatch); C++ may emit **`torn_epoch_skip`** to stderr unless **`HIVECLAW_TELEMETRY=0`**. LLM scripts use a **trained SAE** in **`models/hiveclaw_sae_v1.safetensors`** (see `scripts/harvester.py`, `scripts/train_sae.py`).
+**Layout:** global header **4096** bytes (magic `u64` @ 0, version `u32` @ 8, `n_slots` @ 12, `stride` @ 16). Each slot is **640** bytes: 64-byte header (`slot_state`, Mach `last_claim`, `front_epoch`), **256×bf16** payload (512 B), 64-byte footer with **`back_epoch` at +576** from slot base. Writers bump **`front_epoch`**, copy **512** B, set **`back_epoch`**. **`read_slot_v5` / `WriteSlab`** enforce torn detection (zeros on mismatch); C++ may emit **`torn_epoch_skip`** to stderr unless **`HIVECLAW_TELEMETRY=0`**. LLM scripts use a **trained SAE** in **`models/hiveclaw_sae_v1.safetensors`** (see `training/harvester.py`, `training/train_sae.py`).
 
 **Integration harness (subprocess-safe):** with `pheromoned` loaded and venv active:
 
 ```bash
-python scripts/integration_test.py          # XPC v5 + header + read_slot_v5 smoke
-python scripts/integration_test.py --quick  # same as default smoke path
-python scripts/integration_test.py --stress # claim/release (256 slots) + swarm_spike + SIGKILL
-python scripts/integration_test.py --stress --stress-max-slots 4096   # full slab gauntlet
-python scripts/integration_test.py --batched   # read_slots / write_slots (daemon + venv)
+python tests/integration_test.py          # XPC v5 + header + read_slot_v5 smoke
+python tests/integration_test.py --quick  # same as default smoke path
+python tests/integration_test.py --stress # claim/release (256 slots) + swarm_spike + SIGKILL
+python tests/integration_test.py --stress --stress-max-slots 4096   # full slab gauntlet
+python tests/integration_test.py --batched   # read_slots / write_slots (daemon + venv)
 ```
 
-**Phase 6 batched steering:** `scripts/test_batched_steering.py` exercises `read_slots`, `write_slots`, and `steer_hidden_batched` (requires daemon + `models/hiveclaw_sae_v1.safetensors`). Do **not** run MLX integration or batched tests while **`scripts/harvester.py`** (or another Metal-heavy workload) is using the same GPU — contention can flake reads/writes. **`make python`** only builds native extensions; it never runs those tests.
+**Phase 6 batched steering:** `tests/test_batched_steering.py` exercises `read_slots`, `write_slots`, and `steer_hidden_batched` (requires daemon + `models/hiveclaw_sae_v1.safetensors`). Do **not** run MLX integration or batched tests while **`training/harvester.py`** (or another Metal-heavy workload) is using the same GPU — contention can flake reads/writes. **`make python`** only builds native extensions; it never runs those tests.
 
-**Phase 7 continuous batching:** Set **`HIVECLAW_CONTINUOUS_BATCH=1`** and install **`scripts/requirements-server.txt`** (includes **`mlx-lm`** + **`httpx`**). **`python scripts/hiveclaw_server.py`** then uses a **`swarm_batch_worker`** thread and **`stream=true`** only. Helpers: **`scripts/generate_batch.py`**, **`scripts/hiveclaw_kv_mask.py`** (`HiveClawKVCache` masks). Tests: **`scripts/test_continuous_batching.py`** (KV slice/pad, mask shapes; optional golden via **`HIVECLAW_PHASE7_GOLDEN=1`**). **`HIVECLAW_COMPILE_DECODE`** defaults to **`1`** (try **`mx.compile`** inner decode; emits **`compile_status`** / **`eager_fallback`** JSON on stderr; set **`0`** for eager-only). **`HIVECLAW_COMPILE_WARMUP=1`** is **required** with **`HIVECLAW_CONTINUOUS_BATCH=1`** and default **`HIVECLAW_COMPILE_DECODE=1`** (server and batch worker raise **`ValueError`** otherwise); see ADR. Opt-in GPU batched slab: **`HIVECLAW_GPU_BATCH_READ=1`**, **`HIVECLAW_GPU_BATCH_WRITE=1`** (Metal fast path in **`hiveclaw_mlx`**; default remains CPU batched eval). Load test: **`python scripts/burn_in.py`** (see **`--spawn-server`** / **`--concurrency`** / **`--swapin-delta-max`**). One-shot full gate: **`./scripts/verify_burn_in.sh`** (starts server with **`HIVECLAW_MAX_QUEUE_DEPTH=10`**, **`CONCURRENCY=50`**, relaxed swap budget; requires zero **`eager_fallback`** events and a successful **`burn_in`** run). A/B stigmergy vs plain final layer: **`python scripts/benchmark_stigmergy.py`** (spawns two **`hiveclaw_server`** runs; **`--no-stigmergy`** or **`HIVECLAW_STIGMERGY=0`** disables slab claim/read/write on the hot path while keeping **`SlabClient`**). **Consensus + token tax:** **`python scripts/benchmark_consensus.py`** (string-passing multi-agent baseline vs slab latent committee; **`--json-out`** for tables). **External baseline (LangChain):** install **`scripts/requirements-bench-langchain.txt`**, then **`python scripts/benchmark_external.py`** (LangChain-orchestrated string committee vs HiveClaw; **`--no-langchain`** / **`--no-hiveclaw`** to skip either side). See **`docs/adr/BATCHED_STEERING_CONTRACT.md`** Phase 7.
+**Phase 7 continuous batching:** Set **`HIVECLAW_CONTINUOUS_BATCH=1`** and install **`requirements/requirements-server.txt`** (includes **`mlx-lm`** + **`httpx`**). **`hiveclaw-server`** then uses a **`swarm_batch_worker`** thread and **`stream=true`** only. Helpers: **`crates/hiveclaw-python/python/hiveclaw_python/batching/generate_batch.py`**, **`crates/hiveclaw-python/python/hiveclaw_python/batching/kv_mask.py`** (`HiveClawKVCache` masks). Tests: **`tests/test_continuous_batching.py`** (KV slice/pad, mask shapes; optional golden via **`HIVECLAW_PHASE7_GOLDEN=1`**). **`HIVECLAW_COMPILE_DECODE`** defaults to **`1`** (try **`mx.compile`** inner decode; emits **`compile_status`** / **`eager_fallback`** JSON on stderr; set **`0`** for eager-only). **`HIVECLAW_COMPILE_WARMUP=1`** is **required** with **`HIVECLAW_CONTINUOUS_BATCH=1`** and default **`HIVECLAW_COMPILE_DECODE=1`** (server and batch worker raise **`ValueError`** otherwise); see ADR. Opt-in GPU batched slab: **`HIVECLAW_GPU_BATCH_READ=1`**, **`HIVECLAW_GPU_BATCH_WRITE=1`** (Metal fast path in **`hiveclaw_mlx`**; default remains CPU batched eval). Load test: **`python scripts/burn_in.py`** (see **`--spawn-server`** / **`--concurrency`** / **`--swapin-delta-max`**). One-shot full gate: **`./scripts/verify_burn_in.sh`** (starts server with **`HIVECLAW_MAX_QUEUE_DEPTH=10`**, **`CONCURRENCY=50`**, relaxed swap budget; requires zero **`eager_fallback`** events and a successful **`burn_in`** run). A/B stigmergy vs plain final layer: **`python scripts/benchmark_stigmergy.py`** (spawns two **`hiveclaw_server`** runs; **`--no-stigmergy`** or **`HIVECLAW_STIGMERGY=0`** disables slab claim/read/write on the hot path while keeping **`SlabClient`**). **Consensus + token tax:** **`python scripts/benchmark_consensus.py`** (string-passing multi-agent baseline vs slab latent committee; **`--json-out`** for tables). **External baseline (LangChain):** install **`scripts/requirements-bench-langchain.txt`**, then **`python scripts/benchmark_external.py`** (LangChain-orchestrated string committee vs HiveClaw; **`--no-langchain`** / **`--no-hiveclaw`** to skip either side). See **`docs/adr/BATCHED_STEERING_CONTRACT.md`** Phase 7.
 
-**Ironclad verification (exit-0 burn-in):** Run **`bash scripts/ci_ironclad_verify.sh`** after **`make python`**, **`make daemon-load`**, and **`pip install -r scripts/requirements-server.txt`** (same models / SAE as normal server). The script runs **`make doctor`** then **`verify_burn_in.sh`**. Override load/swap tuning via env on **`verify_burn_in.sh`**: **`HEALTH_TIMEOUT_S`** (default **900** — wait for **`/health`** while Phase 7 probe + compile warmup run), **`HIVECLAW_MAX_QUEUE_DEPTH`**, **`CONCURRENCY`**, **`SWAPIN_DELTA_MAX`**, **`PORT`**, **`VERIFY_LOG`**. GitHub-hosted macOS runners often lack a healthy GUI **`launchctl`** domain or cached MLX weights; use a **self-hosted Mac** (or local machine) for a reliable green. Optional manual workflow: **`.github/workflows/ironclad-burn-in.yml`**.
+**Ironclad verification (exit-0 burn-in):** Run **`bash .github/scripts/ci_ironclad_verify.sh`** after **`make python`**, **`make daemon-load`**, and **`pip install -r requirements/requirements-server.txt`** (same models / SAE as normal server). The script runs **`make doctor`** then **`verify_burn_in.sh`**. Override load/swap tuning via env on **`verify_burn_in.sh`**: **`HEALTH_TIMEOUT_S`** (default **900** — wait for **`/health`** while Phase 7 probe + compile warmup run), **`HIVECLAW_MAX_QUEUE_DEPTH`**, **`CONCURRENCY`**, **`SWAPIN_DELTA_MAX`**, **`PORT`**, **`VERIFY_LOG`**. GitHub-hosted macOS runners often lack a healthy GUI **`launchctl`** domain or cached MLX weights; use a **self-hosted Mac** (or local machine) for a reliable green. Optional manual workflow: **`.github/workflows/ironclad-burn-in.yml`**.
 
 **Doctor (macOS):** After **`make python`** and **`make daemon-load`**, run **`make doctor`** from the same repo root. It checks **`launchctl print gui/$UID/com.hiveclaw.pheromoned`** (running state, **`program`** path vs **`target/release/pheromoned`**) and **`SlabClient()`**. If integration tests show **`magic_version 0x0`** or **`Connection invalid`**, the loaded daemon usually does not match this checkout or is not running—fix with **`make daemon-uninstall && make daemon-load`** (one canonical tree; rebuild release before reload).
 
-**CI / smoke (macOS):** On a self-hosted or interactive Mac with GPU and venv ready, **`bash scripts/ci_mac_smoke.sh`** runs **`make doctor`** then **`scripts/integration_test.py --quick`**. For the full SSE + **`burn_in`** Ironclad gate, use **`bash scripts/ci_ironclad_verify.sh`** (heavier; see **Ironclad verification** above).
+**CI / smoke (macOS):** On a self-hosted or interactive Mac with GPU and venv ready, **`bash .github/scripts/ci_mac_smoke.sh`** runs **`make doctor`** then **`tests/integration_test.py --quick`**. For the full SSE + **`burn_in`** Ironclad gate, use **`bash .github/scripts/ci_ironclad_verify.sh`** (heavier; see **Ironclad verification** above).
 
 ---
 
@@ -65,7 +65,7 @@ make daemon-status
 
 ---
 
-The script runs **Agent A** (prefill → SAE encode → **`write_slot_v5`**) on slot 0, then **Agent B** generates with **`read_slot_v5` → decode → L2 clamp → inject** on the last token. Requires **`models/hiveclaw_sae_v1.safetensors`**. See `scripts/intelligence_spike.py`.
+The script runs **Agent A** (prefill → SAE encode → **`write_slot_v5`**) on slot 0, then **Agent B** generates with **`read_slot_v5` → decode → L2 clamp → inject** on the last token. Requires **`models/hiveclaw_sae_v1.safetensors`**. See `internal/spikes/intelligence_spike.py`.
 
 ### 1. Environment reset (Conda off)
 
@@ -82,10 +82,10 @@ Python **≥ 3.11** (project requirement):
 cd ~/dev/HiveClaw
 python3.11 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r scripts/requirements-spike.txt
+python -m pip install -r requirements/requirements-spike.txt
 ```
 
-Build the PyO3 + MLX extensions (from repo root; also runs `pip install -r scripts/requirements-spike.txt`):
+Build the PyO3 + MLX extensions (from repo root; also runs `pip install -r requirements/requirements-spike.txt`):
 
 ```bash
 cd ~/dev/HiveClaw
@@ -101,7 +101,7 @@ Always pass **`PYTHON="$(pwd)/.venv/bin/python3"`** when a **`.venv`** exists so
 
 **`make python` vs repo `.venv`:** If **`$(pwd)/.venv`** exists, you must run **`make python PYTHON=$(pwd)/.venv/bin/python3`** (or activate that venv and use `python3` so it resolves to the same binary). Otherwise maturin can still **discover** `.venv` while building for a **different** interpreter → wrong arch / wrong CPython → **`RuntimeError: std::bad_cast`** at `write_scent` / `read_scent`. The Makefile **`python-check-maturin`** target enforces this match.
 
-Alternative without `make python`: `cd crates/hiveclaw-mlx && python setup.py build_ext --inplace`, copy `hiveclaw_mlx_ext*.so` into `crates/hiveclaw-python/python/hiveclaw_python/`, then `cd ../hiveclaw-python && maturin develop --release` with the **same** `python` and an active **`VIRTUAL_ENV`** (still run `pip install -r scripts/requirements-spike.txt` once).
+Alternative without `make python`: `cd crates/hiveclaw-mlx && python setup.py build_ext --inplace`, copy `hiveclaw_mlx_ext*.so` into `crates/hiveclaw-python/python/hiveclaw_python/`, then `cd ../hiveclaw-python && maturin develop --release` with the **same** `python` and an active **`VIRTUAL_ENV`** (still run `pip install -r requirements/requirements-spike.txt` once).
 
 ### Python ↔ C++ `SlabHandle` API
 
@@ -123,14 +123,14 @@ Treat the MLX path as stable only after:
 
 1. **Daemon (prefer Terminal.app if the IDE terminal fails):** from repo root, `make daemon-load`
 2. **Verify:** `make daemon-status` — `program` must be **`~/dev/HiveClaw/target/release/pheromoned`** (path to **`pheromoned`** in your active checkout).
-3. **Smoke:** `source .venv/bin/activate` → `python scripts/swarm_spike.py` — must get past the **first `read_scent`** without **`RuntimeError: std::bad_cast`**.
+3. **Smoke:** `source .venv/bin/activate` → `python internal/spikes/swarm_spike.py` — must get past the **first `read_scent`** without **`RuntimeError: std::bad_cast`**.
 
 ### 3. `RuntimeError: std::bad_cast` (MLX / nanobind ABI)
 
 This happens when **`hiveclaw_mlx_ext`** was built against a **different MLX / nanobind / Python** than the one loaded at runtime: nanobind cannot cast Python **`mlx.core.array`** to C++ **`mlx::core::array`**.
 
 1. **One interpreter:** Use a **single** venv (Python **≥ 3.11**). Avoid **`(conda base)` + `.venv`** — run `conda deactivate` until base is gone, then `source .venv/bin/activate`.
-2. **Pinned MLX:** `scripts/requirements-spike.txt` pins **`mlx`**, **`mlx-metal`**, and **`mlx-lm`**. After **`pip install -U mlx`**, rebuild: **`make python-clean`** then **`make python PYTHON="$(pwd)/.venv/bin/python3"`**.
+2. **Pinned MLX:** `requirements/requirements-spike.txt` pins **`mlx`**, **`mlx-metal`**, and **`mlx-lm`**. After **`pip install -U mlx`**, rebuild: **`make python-clean`** then **`make python PYTHON="$(pwd)/.venv/bin/python3"`**.
 3. **Deep clean (optional):** `make python-clean`, then optionally `rm -rf target/` and `cargo clean`, then **`make python`** again from repo root.
 4. **Verify linkage (optional):** `otool -L crates/hiveclaw-mlx/hiveclaw_mlx_ext*.so` — extension should match your machine (**arm64** vs **x86_64**) and typical MLX install under site-packages.
 5. **Unset stray loader paths:** If you use `DYLD_LIBRARY_PATH`, try unsetting it for a test run (SIP may strip it for some binaries; conda can still inject conflicting `libmlx`).
@@ -161,12 +161,12 @@ To unload and remove the LaunchAgent plist from `~/Library/LaunchAgents/` (e.g. 
 cd ~/dev/HiveClaw
 source .venv/bin/activate
 make python PYTHON="$(pwd)/.venv/bin/python3"
-python scripts/intelligence_spike.py
+python internal/spikes/intelligence_spike.py
 ```
 
 If `SlabClient` cannot connect, the script prints to stderr:
 
-`pheromoned is not running...` — ensure `make daemon-load` succeeded. The active plist is **`~/Library/LaunchAgents/com.hiveclaw.pheromoned.plist`** (a copy also appears as `com.hiveclaw.pheromoned.gen.plist` in the repo). `ProgramArguments` must point at **`…/target/release/pheromoned`** for this checkout.
+`pheromoned is not running...` — ensure `make daemon-load` succeeded. The active plist is **`~/Library/LaunchAgents/com.hiveclaw.pheromoned.plist`** (a copy also appears as `com.hiveclaw.pheromoned.gen.plist` in the repo). The template is **`crates/hiveclaw-daemon/data/com.hiveclaw.pheromoned.plist.in`** (wheel copy under `hiveclaw_python/data/` must match — run **`make check-plist`**). `ProgramArguments` must point at **`…/target/release/pheromoned`** for this checkout.
 
 **`make daemon-load` → `Bootstrap failed: 5 / Input/output error`:** The GUI launchd domain (`gui/$(id -u)`) is not available from every shell. **Cursor, VS Code, and some SSH sessions** often return this error even though the plist path is correct.
 
@@ -211,7 +211,7 @@ make python PYTHON="$(pwd)/.venv/bin/python3"
 In **4** separate terminals (each `cd ~/dev/HiveClaw`, `source .venv/bin/activate`):
 
 ```bash
-python scripts/swarm_spike.py
+python internal/spikes/swarm_spike.py
 ```
 
 Minimal claim → write → read → release (one process): **`python examples/hello_swarm.py`**.
@@ -221,14 +221,14 @@ In a **5th** terminal:
 ```bash
 cd ~/dev/HiveClaw
 source .venv/bin/activate
-python scripts/overseer.py
+hiveclaw-overseer
 ```
 
 Each `swarm_spike.py` instance races to claim slab slots, runs synthetic matmul FLOPs while holding the lock, then blends slot scent toward a random goal. `overseer.py` inhibits any slot whose geometry freezes (mean per-dimension variance &lt; 1e-5 over the last 5 ticks).
 
-**Single-terminal demo:** `python scripts/overseer_demo.py` — two synthetic agent threads (fixed slots) plus an overseer thread; prints `INHIBIT` → `REROUTE` lifecycle to stdout (no LLM, no extra terminals).
+**Single-terminal demo:** `python internal/spikes/overseer_demo.py` — two synthetic agent threads (fixed slots) plus an overseer thread; prints `INHIBIT` → `REROUTE` lifecycle to stdout (no LLM, no extra terminals).
 
-## LLM swarm integration (`scripts/llm_swarm.py`)
+## LLM swarm integration (`internal/spikes/llm_swarm.py`)
 
 Multi-process test: **real** `mlx_lm` generation (default **`mlx-community/Llama-3.2-1B-Instruct-4bit`**) plus slab **sense → claim → generate (≤10 tokens) → write post-steer scent → release**. Each agent uses a **static goal vector** from a one-time prefill on its initial prompt; cosine pressure ranks unclaimed slots. **`--alpha`** tunes steering (default `0.1`). On EOS before 10 tokens, the agent picks a new prompt from a built-in pool.
 
@@ -250,7 +250,7 @@ Multi-process test: **real** `mlx_lm` generation (default **`mlx-community/Llama
    ```bash
    cd ~/dev/HiveClaw
    source .venv/bin/activate
-   python scripts/overseer.py
+   hiveclaw-overseer
    ```
 
 3. **Terminals 3–5** — LLM agents (use different `--prompt` strings per terminal):
@@ -258,15 +258,15 @@ Multi-process test: **real** `mlx_lm` generation (default **`mlx-community/Llama
    ```bash
    cd ~/dev/HiveClaw
    source .venv/bin/activate
-   python scripts/llm_swarm.py --prompt "Tell a story about a dog."
+   python internal/spikes/llm_swarm.py --prompt "Tell a story about a dog."
    ```
 
    ```bash
-   python scripts/llm_swarm.py --prompt "Write a poem about space."
+   python internal/spikes/llm_swarm.py --prompt "Write a poem about space."
    ```
 
    ```bash
-   python scripts/llm_swarm.py --prompt "Explain quantum physics in simple terms."
+   python internal/spikes/llm_swarm.py --prompt "Explain quantum physics in simple terms."
    ```
 
 ### Action 5 observation checklist
@@ -282,14 +282,14 @@ Do not merge the feature branch to `main` until this checklist is green in your 
 
 ## Phase 5 — FastAPI server + TUI dashboard
 
-OpenAI-compatible **`POST /v1/chat/completions`** (streaming and non-streaming), **`GET /health`**, and a JSON snapshot **`GET /v1/slots`**. The server loads the SAE, connects to **`pheromoned`**, and runs **Llama 3.2 1B** with **`ActiveSteeringWrapper`** from `scripts/hiveclaw_steering.py`. **`MAX_CONCURRENT = 1`** serializes MLX work (safe layer swap); scale-out is a follow-on.
+OpenAI-compatible **`POST /v1/chat/completions`** (streaming and non-streaming), **`GET /health`**, and a JSON snapshot **`GET /v1/slots`**. The server loads the SAE, connects to **`pheromoned`**, and runs **Llama 3.2 1B** with **`ActiveSteeringWrapper`** from `hiveclaw_python/steering.py`. **`MAX_CONCURRENT = 1`** serializes MLX work (safe layer swap); scale-out is a follow-on.
 
 ### Install server + dashboard deps
 
 ```bash
 cd ~/dev/HiveClaw
 source .venv/bin/activate
-pip install -r scripts/requirements-server.txt
+pip install -r requirements/requirements-server.txt
 ```
 
 Requires the same MLX spike venv + `make python` as Phase 4A, and **`models/hiveclaw_sae_v1.safetensors`**.
@@ -308,7 +308,7 @@ make daemon-status
 ```bash
 cd ~/dev/HiveClaw
 source .venv/bin/activate
-python scripts/hiveclaw_server.py --host 127.0.0.1 --port 8080
+hiveclaw-server --host 127.0.0.1 --port 8080
 ```
 
 Or with uvicorn directly (lifespan loads MLX + slab on startup):
@@ -316,7 +316,7 @@ Or with uvicorn directly (lifespan loads MLX + slab on startup):
 ```bash
 cd ~/dev/HiveClaw
 source .venv/bin/activate
-uvicorn hiveclaw_server:app --app-dir scripts --host 127.0.0.1 --port 8080
+uvicorn hiveclaw_python.openai_server:app --host 127.0.0.1 --port 8080
 ```
 
 **Dashboard (another tab):**
@@ -324,13 +324,13 @@ uvicorn hiveclaw_server:app --app-dir scripts --host 127.0.0.1 --port 8080
 ```bash
 cd ~/dev/HiveClaw
 source .venv/bin/activate
-python scripts/hiveclaw_dashboard.py --refresh-ms 1000 --max-slots 64
+hiveclaw-dashboard --refresh-ms 1000 --max-slots 64
 ```
 
 Optional: point at a JSON-lines log for telemetry counts (e.g. redirect daemon stderr, or aggregate logs that contain `{"event":"poison_clamp",...}` / `torn_epoch_skip`):
 
 ```bash
-python scripts/hiveclaw_dashboard.py --max-slots 32 --telemetry-log /tmp/hiveclaw_telem.log
+hiveclaw-dashboard --max-slots 32 --telemetry-log /tmp/hiveclaw_telem.log
 ```
 
 ### curl examples

@@ -22,7 +22,7 @@ User-facing Python APIs should prefer neutral names (**`HiveClawManager`**, **`S
 
 - **`pheromoned`** (Rust, macOS LaunchAgent) owns Mach service **`com.hiveclaw.pheromoned`** and brokers **XPC** plus **IOSurface** handoff to clients.
 - Python **`hiveclaw_python.SlabClient`** talks to the daemon; **`hiveclaw_mlx`** can accelerate batched slab traffic on **Metal** (CPU paths remain the correctness baseline).
-- The OpenAI-compatible **API gateway** is FastAPI-based: [`hiveclaw_python.openai_server`](../crates/hiveclaw-python/python/hiveclaw_python/openai_server.py), launched via [`scripts/hiveclaw_server.py`](../scripts/hiveclaw_server.py).
+- The OpenAI-compatible **API gateway** is FastAPI-based: [`hiveclaw_python.openai_server`](../crates/hiveclaw-python/python/hiveclaw_python/openai_server.py), launched via `hiveclaw-server` / `python -m hiveclaw_python.server_main` (see [`server_main.py`](../crates/hiveclaw-python/python/hiveclaw_python/server_main.py)).
 
 Peer coordination does not require a central JSON message bus: the **shared surface** plus **SAE** geometry is the coordination substrate (see steering and slab sections below).
 
@@ -50,7 +50,7 @@ Python APIs: `read_slot_v5`, `write_slot_v5`, batched variants, `claim_task` / `
 
 Slot payloads are **256×bf16** SAE latents (**`SCENT_ELEMS`** in [`crates/hiveclaw-core/src/math.rs`](../crates/hiveclaw-core/src/math.rs)). **`SlabClient.get_latent_dim()`** (and **`hiveclaw_mlx_ext.get_latent_dim()`**) expose the dimension.
 
-**Llama 3.2 1B** hidden size is **2048**; the trained SAE maps **2048 → 256** for the slab. Default artifact: **`models/hiveclaw_sae_v1.safetensors`** (see `scripts/harvester.py`, `scripts/train_sae.py`).
+**Llama 3.2 1B** hidden size is **2048**; the trained SAE maps **2048 → 256** for the slab. Default artifact: **`models/hiveclaw_sae_v1.safetensors`** (see `training/harvester.py`, `training/train_sae.py`).
 
 **Breaking change:** any edit to `math.rs` (especially `SCENT_ELEMS`) changes the IOSurface layout — rebuild native code, rebuild **`pheromoned`**, and reload the daemon (see canonical reset steps in [`scripts/README.md`](../scripts/README.md)).
 
@@ -62,7 +62,7 @@ Slot payloads are **256×bf16** SAE latents (**`SCENT_ELEMS`** in [`crates/hivec
 
 Set **`HIVECLAW_CONTINUOUS_BATCH=1`** with **`requirements/requirements-server.txt`** (includes **mlx-lm** + **httpx**). The server uses a **`swarm_batch_worker`** thread; **`stream=true`** paths are primary for this mode.
 
-- Helpers: **`scripts/generate_batch.py`**, **`scripts/hiveclaw_kv_mask.py`** (`HiveClawKVCache` masks).
+- Helpers: [`hiveclaw_python.batching.generate_batch`](../crates/hiveclaw-python/python/hiveclaw_python/batching/generate_batch.py), [`hiveclaw_python.batching.kv_mask`](../crates/hiveclaw-python/python/hiveclaw_python/batching/kv_mask.py) (`HiveClawKVCache` masks).
 - Tests: **`tests/test_continuous_batching.py`** (KV slice/pad, mask shapes; optional golden via **`HIVECLAW_PHASE7_GOLDEN=1`**).
 - **`HIVECLAW_COMPILE_DECODE`** defaults to **`1`** (try **`mx.compile`** on the inner decode; emits **`compile_status`** / **`eager_fallback`** JSON on stderr; set **`0`** for eager-only).
 - **`HIVECLAW_COMPILE_WARMUP=1`** is **required** with **`HIVECLAW_CONTINUOUS_BATCH=1`** and default **`HIVECLAW_COMPILE_DECODE=1`** (server and batch worker raise **`ValueError`** otherwise). See **[ADR: batched steering contract](adr/BATCHED_STEERING_CONTRACT.md)**.

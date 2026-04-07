@@ -20,7 +20,7 @@ import mlx.core as mx
 import numpy as np
 
 import hiveclaw_python as h
-from hiveclaw_steering import (
+from hiveclaw_python.steering import (
     check_latent_dim,
     load_sae,
     steer_hidden,

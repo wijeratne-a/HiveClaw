@@ -37,6 +37,6 @@ def package_plist_template_path() -> Path:
 
 
 def render_plist_program(program: Path | str) -> str:
-    """Same layout as repo-root ``com.hiveclaw.pheromoned.plist.in``."""
+    """Same layout as ``crates/hiveclaw-daemon/data/com.hiveclaw.pheromoned.plist.in``."""
     body = package_plist_template_path().read_text(encoding="utf-8")
     return body.replace("@PROGRAM@", str(program))

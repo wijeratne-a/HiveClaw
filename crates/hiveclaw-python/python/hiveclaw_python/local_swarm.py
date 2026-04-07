@@ -32,7 +32,7 @@ class LocalSwarm:
     **Coordination model:** multi-agent state is exchanged through **256-D bf16 latents**
     in the IOSurface slab (VRAM-backed); HTTP/SSE only carries user prompts and streamed
     text — it is not zero-copy for every chat byte. Slot indices pick slab rows for
-    stigmergy; tune ``HIVECLAW_*`` env vars (see ``scripts/hiveclaw_server.py``) for
+    stigmergy; tune ``HIVECLAW_*`` env vars (see ``hiveclaw_python.openai_server``) for
     advanced batching and stigmergy behavior.
 
     Optional **Catenar** Proof-of-Task: set ``catenar_enabled=True`` and install the SDK

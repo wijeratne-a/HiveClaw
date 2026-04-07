@@ -52,7 +52,7 @@ rm -f "${LOG}"
 touch "${LOG}"
 
 echo "[verify_burn_in] starting server on 127.0.0.1:${PORT} (max_queue_depth=${HIVECLAW_MAX_QUEUE_DEPTH}) ..."
-"${PYTHON}" scripts/hiveclaw_server.py --host 127.0.0.1 --port "${PORT}" >>"${LOG}" 2>&1 &
+"${PYTHON}" -m hiveclaw_python.server_main --host 127.0.0.1 --port "${PORT}" >>"${LOG}" 2>&1 &
 SERVER_PID=$!
 
 echo "[verify_burn_in] waiting for /health (timeout=${HEALTH_TIMEOUT_S}s) ..."

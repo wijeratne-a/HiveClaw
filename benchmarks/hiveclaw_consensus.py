@@ -21,7 +21,7 @@ if str(_scripts_dir) not in sys.path:
 
 import mlx.core as mx
 import numpy as np
-from hiveclaw_steering import ActiveSteeringWrapper, check_latent_dim, load_sae
+from hiveclaw_python.steering import ActiveSteeringWrapper, check_latent_dim, load_sae
 from mlx_lm import load
 from mlx_lm.generate import generate_step
 from mlx_lm.sample_utils import make_sampler

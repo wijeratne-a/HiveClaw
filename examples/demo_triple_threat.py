@@ -20,7 +20,7 @@ otherwise Gemini if ``GEMINI_API_KEY`` or ``GOOGLE_API_KEY`` is set.
 Usage::
 
   pip install -r requirements/requirements-bench-openai.txt
-  python scripts/hiveclaw_server.py --host 127.0.0.1 --port 8080   # terminal A
+  hiveclaw-server --host 127.0.0.1 --port 8080   # terminal A
   export GEMINI_API_KEY=...
   python examples/demo_triple_threat.py --cloud-provider gemini
 """

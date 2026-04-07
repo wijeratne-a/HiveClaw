@@ -9,23 +9,17 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
-
-_REPO = Path(__file__).resolve().parents[1]
-_scripts_dir = _REPO / "scripts"
-if str(_scripts_dir) not in sys.path:
-    sys.path.insert(0, str(_scripts_dir))
 
 import mlx.core as mx
 import numpy as np
 from unittest.mock import patch
 
-from generate_batch import (
+from hiveclaw_python.batching.generate_batch import (
     next_pow2_bucket,
     pad_kv_cache_batch_dim,
     slice_kv_cache_batch_dim,
 )
-from hiveclaw_kv_mask import (
+from hiveclaw_python.batching.kv_mask import (
     HiveClawKVCache,
     HiveClawRotatingKVCache,
     install_hiveclaw_kv_cache,
@@ -147,7 +141,9 @@ def test_sentinel_validation_allowed() -> None:
             "[test_continuous_batching] skip sentinel validation (hiveclaw_python missing)"
         )
         return
-    B = _validate_batch_slots_arr(mx.array([-1, 0, 1, -1], dtype=mx.int32))
+    B = _validate_batch_slots_arr(
+        mx.array([-1, 0, 1, -1], dtype=mx.int32), n_slots=4096
+    )
     assert B == 4
 
 
@@ -157,7 +153,9 @@ def test_real_duplicate_rejected() -> None:
     except ImportError:
         return
     try:
-        _validate_batch_slots_arr(mx.array([0, 0, -1, -1], dtype=mx.int32))
+        _validate_batch_slots_arr(
+            mx.array([0, 0, -1, -1], dtype=mx.int32), n_slots=4096
+        )
     except ValueError:
         return
     raise AssertionError("expected ValueError for duplicate real slots")
@@ -179,7 +177,7 @@ class _MockSlabSlots:
 
 
 def test_static_shape_steering() -> None:
-    from hiveclaw_steering import apply_steering_sandwich
+    from hiveclaw_python.steering import apply_steering_sandwich
 
     B = 4
     h = mx.ones((B, 1, _MOCK_HIDDEN), dtype=mx.float32)
@@ -205,12 +203,12 @@ def test_compiled_decode_no_fallback() -> None:
         return
     print(
         "[test_continuous_batching] HIVECLAW_COMPILE_DECODE_CI=1: "
-        "run scripts/generate_batch.py integration with daemon to assert no compile fallback"
+        "run hiveclaw_python.batching.generate_batch integration with daemon to assert no compile fallback"
     )
 
 
 def test_probe_max_batch_mock() -> None:
-    import generate_batch as gb
+    import hiveclaw_python.batching.generate_batch as gb
 
     class FakeModel:
         def __call__(self, toks, cache=None):

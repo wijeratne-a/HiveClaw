@@ -1,6 +1,6 @@
 """Slab / stigmergy helpers for multi-agent scripts.
 
-Full LLM continuous batching stays in ``scripts/generate_batch.py``; this module only
+Full LLM continuous batching stays in ``hiveclaw_python.batching.generate_batch``; this module only
 wraps common ``SlabClient`` patterns (claim, cosine scoring, read/write v5).
 """
 

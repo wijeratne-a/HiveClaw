@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .manager import HiveClawManager
 
-_MARKERS = ("com.hiveclaw.pheromoned.plist.in", "Makefile")
+_PLIST_REL = Path("crates/hiveclaw-daemon/data/com.hiveclaw.pheromoned.plist.in")
 
 
 def resolve_manager_repo_root(repo_root: Path | str | None) -> Path:
@@ -17,7 +17,7 @@ def resolve_manager_repo_root(repo_root: Path | str | None) -> Path:
 
     Order: explicit ``repo_root``, then :func:`find_repo_root`, then ``HIVECLAW_REPO_ROOT``,
     then the installed ``hiveclaw_python`` package directory (daemon may still work via a
-    bundled ``pheromoned``; :meth:`HiveClawManager.spawn_server` needs a checkout).
+    bundled ``pheromoned``; set ``HIVECLAW_REPO_ROOT`` for model paths when not in a checkout).
     """
     if repo_root is not None:
         return Path(repo_root).resolve()
@@ -35,16 +35,16 @@ def resolve_manager_repo_root(repo_root: Path | str | None) -> Path:
 def find_repo_root(start: Path | None = None) -> Path:
     """
     Walk upward from ``start`` (default: this package directory) for a directory
-    containing ``Makefile`` and ``com.hiveclaw.pheromoned.plist.in``.
+    containing ``Makefile`` and ``crates/hiveclaw-daemon/data/com.hiveclaw.pheromoned.plist.in``.
     """
     here = (start or Path(__file__).resolve().parent).resolve()
     for d in [here, *here.parents]:
-        ok = all((d / m).is_file() for m in _MARKERS)
-        if ok:
+        if (d / "Makefile").is_file() and (d / _PLIST_REL).is_file():
             return d
     raise RuntimeError(
         "Cannot auto-detect HiveClaw repo root (need Makefile + "
-        "com.hiveclaw.pheromoned.plist.in). Pass repo_root= to init() explicitly."
+        "crates/hiveclaw-daemon/data/com.hiveclaw.pheromoned.plist.in). "
+        "Pass repo_root= to init() explicitly."
     )
 
 
@@ -59,8 +59,8 @@ def init(
     Create a :class:`HiveClawManager` and optionally bootstrap the LaunchAgent.
 
     - ``repo_root``: checkout root; default :func:`find_repo_root`, else ``HIVECLAW_REPO_ROOT``,
-      else the ``hiveclaw_python`` install directory (bundled ``pheromoned`` only; server still
-      needs a checkout — see :func:`resolve_manager_repo_root`).
+      else the ``hiveclaw_python`` install directory (bundled ``pheromoned`` only; set
+      ``HIVECLAW_REPO_ROOT`` when resolving repo-relative model paths — see :func:`resolve_manager_repo_root`).
     - ``build_if_missing``: run ``cargo build --release -p hiveclaw-daemon`` if needed.
     - ``bootstrap_daemon``: install plist + ``launchctl bootstrap`` when not already
       running this binary.

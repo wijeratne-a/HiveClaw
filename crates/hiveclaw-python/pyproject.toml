@@ -12,6 +12,8 @@ readme = "README-PYTHON.md"
 
 [project.scripts]
 hiveclaw-server = "hiveclaw_python.server_main:main"
+hiveclaw-dashboard = "hiveclaw_python.cli.dashboard:main"
+hiveclaw-overseer = "hiveclaw_python.cli.overseer:main"
 
 [tool.maturin]
 module-name = "hiveclaw_python._core"

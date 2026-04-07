@@ -131,8 +131,15 @@ def _spawn_server(python_exe: str, port: int, *, stigmergy: bool) -> subprocess.
     env["HIVECLAW_CONTINUOUS_BATCH"] = "1"
     env["HIVECLAW_COMPILE_WARMUP"] = "1"
     env["HIVECLAW_COMPILE_DECODE"] = env.get("HIVECLAW_COMPILE_DECODE", "1")
-    srv = _repo / "scripts" / "hiveclaw_server.py"
-    cmd = [python_exe, str(srv), "--host", "127.0.0.1", "--port", str(port)]
+    cmd = [
+        python_exe,
+        "-m",
+        "hiveclaw_python.server_main",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
     if not stigmergy:
         cmd.append("--no-stigmergy")
     return subprocess.Popen(

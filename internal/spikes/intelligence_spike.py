@@ -1,16 +1,12 @@
 import sys
 from pathlib import Path
 
-_scripts_dir = Path(__file__).resolve().parent
-if str(_scripts_dir) not in sys.path:
-    sys.path.insert(0, str(_scripts_dir))
-
 import mlx.core as mx
 from mlx_lm import load
 from mlx_lm.generate import generate_step
 from mlx_lm.sample_utils import make_sampler
 
-from hiveclaw_steering import (
+from hiveclaw_python.steering import (
     ActiveSteeringWrapper,
     CaptureWrapper,
     check_latent_dim,
@@ -18,7 +14,9 @@ from hiveclaw_steering import (
 )
 
 MODEL_ID = "mlx-community/Llama-3.2-1B-Instruct-4bit"
-SAE_PATH = Path(__file__).resolve().parent.parent / "models/hiveclaw_sae_v1.safetensors"
+SAE_PATH = (
+    Path(__file__).resolve().parents[2] / "models" / "hiveclaw_sae_v1.safetensors"
+)
 
 _SPIKE_SAMPLER = make_sampler(temp=0.0)
 FATAL_LINE = (
