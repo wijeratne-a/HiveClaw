@@ -70,7 +70,7 @@ async def _run_phase(
         import httpx
     except ImportError as e:
         raise SystemExit(
-            "httpx required: pip install -r scripts/requirements-server.txt"
+            "httpx required: pip install -r requirements/requirements-server.txt"
         ) from e
 
     url = base_url.rstrip("/") + "/v1/chat/completions"

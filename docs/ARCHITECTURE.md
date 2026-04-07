@@ -60,10 +60,10 @@ Slot payloads are **256×bf16** SAE latents (**`SCENT_ELEMS`** in [`crates/hivec
 
 ## Continuous batching (Phase 7)
 
-Set **`HIVECLAW_CONTINUOUS_BATCH=1`** with **`scripts/requirements-server.txt`** (includes **mlx-lm** + **httpx**). The server uses a **`swarm_batch_worker`** thread; **`stream=true`** paths are primary for this mode.
+Set **`HIVECLAW_CONTINUOUS_BATCH=1`** with **`requirements/requirements-server.txt`** (includes **mlx-lm** + **httpx**). The server uses a **`swarm_batch_worker`** thread; **`stream=true`** paths are primary for this mode.
 
 - Helpers: **`scripts/generate_batch.py`**, **`scripts/hiveclaw_kv_mask.py`** (`HiveClawKVCache` masks).
-- Tests: **`scripts/test_continuous_batching.py`** (KV slice/pad, mask shapes; optional golden via **`HIVECLAW_PHASE7_GOLDEN=1`**).
+- Tests: **`tests/test_continuous_batching.py`** (KV slice/pad, mask shapes; optional golden via **`HIVECLAW_PHASE7_GOLDEN=1`**).
 - **`HIVECLAW_COMPILE_DECODE`** defaults to **`1`** (try **`mx.compile`** on the inner decode; emits **`compile_status`** / **`eager_fallback`** JSON on stderr; set **`0`** for eager-only).
 - **`HIVECLAW_COMPILE_WARMUP=1`** is **required** with **`HIVECLAW_CONTINUOUS_BATCH=1`** and default **`HIVECLAW_COMPILE_DECODE=1`** (server and batch worker raise **`ValueError`** otherwise). See **[ADR: batched steering contract](adr/BATCHED_STEERING_CONTRACT.md)**.
 - Opt-in GPU batched slab: **`HIVECLAW_GPU_BATCH_READ=1`**, **`HIVECLAW_GPU_BATCH_WRITE=1`** (Metal fast path in **`hiveclaw_mlx`**; default remains CPU batched eval).
@@ -77,7 +77,7 @@ Load testing: **`python scripts/burn_in.py`** (`--spawn-server`, `--concurrency`
 The repo ships an **exit-0** gate for a **local Apple Silicon Mac** with GUI **`launchctl`**, MLX weights, and the default SAE:
 
 ```bash
-bash scripts/ci_ironclad_verify.sh
+bash .github/scripts/ci_ironclad_verify.sh
 ```
 
 This runs **`make doctor`** (daemon path + **`SlabClient`** handshake) then **[`scripts/verify_burn_in.sh`](../scripts/verify_burn_in.sh)**:
@@ -90,7 +90,7 @@ Phase 7 defaults compile the inner decode step when **`HIVECLAW_COMPILE_DECODE=1
 
 **Overrides** (env on `verify_burn_in.sh`): **`HEALTH_TIMEOUT_S`** (default **900** — wait for **`/health`** while Phase 7 probe + compile warmup run), **`HIVECLAW_MAX_QUEUE_DEPTH`**, **`CONCURRENCY`**, **`SWAPIN_DELTA_MAX`**, **`PORT`**, **`VERIFY_LOG`**.
 
-**CI:** [`.github/workflows/ironclad-burn-in.yml`](../.github/workflows/ironclad-burn-in.yml) (typically needs **self-hosted macOS**). Lighter smoke: **`bash scripts/ci_mac_smoke.sh`**.
+**CI:** [`.github/workflows/ironclad-burn-in.yml`](../.github/workflows/ironclad-burn-in.yml) (typically needs **self-hosted macOS**). Lighter smoke: **`bash .github/scripts/ci_mac_smoke.sh`**.
 
 ---
 

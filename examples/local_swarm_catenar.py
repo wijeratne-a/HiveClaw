@@ -3,8 +3,8 @@
 LocalSwarm with optional Catenar Proof-of-Task traces (one entry per agent SSE turn).
 
 Prereqs:
-  - HiveClaw: make python, daemon, models + SAE, pip install -r scripts/requirements-server.txt
-  - Catenar: pip install per scripts/requirements-catenar.txt; verifier up (e.g. docker compose)
+  - HiveClaw: make python, daemon, models + SAE, pip install -r requirements/requirements-server.txt
+  - Catenar: pip install per requirements/requirements-catenar.txt; verifier up (e.g. docker compose)
 
 Traces append to ./catenar-trace-wal.jsonl; verifier POST /v1/verify returns receipts when healthy.
 """

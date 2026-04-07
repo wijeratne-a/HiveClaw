@@ -50,7 +50,7 @@ def make_tracer(
     except ImportError:
         warnings.warn(
             "catenar_enabled=True but catenar_sdk is not installed. "
-            "pip install per scripts/requirements-catenar.txt — tracing disabled.",
+            "pip install per requirements/requirements-catenar.txt — tracing disabled.",
             stacklevel=2,
         )
         return _NoopTracer()

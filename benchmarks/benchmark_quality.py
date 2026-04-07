@@ -15,15 +15,17 @@ import time
 from collections import Counter
 from pathlib import Path
 
-_scripts = Path(__file__).resolve().parent
-if str(_scripts) not in sys.path:
-    sys.path.insert(0, str(_scripts))
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+if str(_REPO_ROOT / "examples") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "examples"))
 
 from demo_triple_threat import (  # noqa: E402
     _resolve_quality_profile,
     _run_openai_sdk_path,
 )
-from quality_controller import QualityController, QualityGateFailure  # noqa: E402
+from quality_gate.quality_controller import QualityController, QualityGateFailure  # noqa: E402
 
 
 def _fixture_paths(root: Path) -> list[Path]:
@@ -58,7 +60,7 @@ def main() -> int:
         "--fixtures-dir",
         type=str,
         default="",
-        help="Override fixtures directory (default: scripts/fixtures)",
+        help="Override fixtures directory (default: repo root)",
     )
     p.add_argument(
         "--quality-report-only",
@@ -70,7 +72,7 @@ def main() -> int:
     try:
         from openai import OpenAI
     except ImportError as e:
-        print("pip install -r scripts/requirements-bench-openai.txt", file=sys.stderr)
+        print("pip install -r requirements/requirements-bench-openai.txt", file=sys.stderr)
         raise SystemExit(2) from e
 
     profile_path = _resolve_quality_profile(args.profile)
@@ -79,14 +81,14 @@ def main() -> int:
         report_only=True if args.quality_report_only else None,
     )
 
-    fixtures_root = Path(args.fixtures_dir) if args.fixtures_dir else _scripts
+    fixtures_root = Path(args.fixtures_dir) if args.fixtures_dir else _REPO_ROOT
     paths = _fixture_paths(fixtures_root)
     if not paths:
-        demo_target = _scripts / "demo_target.py"
+        demo_target = _REPO_ROOT / "examples" / "demo_target.py"
         paths = [demo_target] if demo_target.is_file() else []
 
     if not paths:
-        print("No fixtures found (scripts/fixtures/*.py or demo_target.py)", file=sys.stderr)
+        print("No fixtures found (fixtures/*.py or examples/demo_target.py)", file=sys.stderr)
         return 2
 
     client = OpenAI(base_url=args.base_url.rstrip("/"), api_key="sk-benchmark")

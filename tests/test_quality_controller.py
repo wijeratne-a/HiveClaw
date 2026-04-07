@@ -4,25 +4,24 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
-_scripts = Path(__file__).resolve().parent
-if str(_scripts) not in sys.path:
-    sys.path.insert(0, str(_scripts))
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-from quality_checks.common_checks import (  # noqa: E402
+from quality_gate.quality_checks.common_checks import (  # noqa: E402
     ViolationSeverity,
     check_fence_extraction,
     extract_single_fence,
 )
-from quality_checks.python_checks import (  # noqa: E402
+from quality_gate.quality_checks.python_checks import (  # noqa: E402
     check_py_compile,
     check_python_parse,
     check_security,
 )
-from quality_controller import (  # noqa: E402
+from quality_gate.quality_controller import (  # noqa: E402
     QualityController,
     QualityGateFailure,
     QualityProfile,
@@ -101,7 +100,7 @@ class TestRuffOptional(unittest.TestCase):
     def test_ruff_skips_gracefully(self) -> None:
         import shutil
 
-        from quality_checks.python_checks import check_ruff
+        from quality_gate.quality_checks.python_checks import check_ruff
 
         if not shutil.which("ruff"):
             self.assertEqual(check_ruff("x=1\n"), [])
@@ -157,7 +156,7 @@ class TestVerifyAndProfile(unittest.TestCase):
         self.assertEqual(r.decision, "ACCEPT")
 
     def test_load_profile_real_file(self) -> None:
-        path = _scripts / "quality_profiles" / "python_refactor.yaml"
+        path = _REPO_ROOT / "quality_gate" / "quality_profiles" / "python_refactor.yaml"
         self.assertTrue(path.is_file(), "expected bundled profile")
         prof = load_profile(path)
         self.assertEqual(prof.artifact_type, "python")
@@ -168,7 +167,7 @@ class TestVerifyAndProfile(unittest.TestCase):
             load_profile(Path("/nonexistent/no.yaml"))
 
     def test_format_repair_dedupes(self) -> None:
-        from quality_checks.common_checks import Violation
+        from quality_gate.quality_checks.common_checks import Violation
 
         v = [
             Violation("A", ViolationSeverity.critical, "m1"),
@@ -183,7 +182,7 @@ class TestVerifyAndProfile(unittest.TestCase):
 
 class TestRunTurnRetries(unittest.TestCase):
     def test_exhaust_raises(self) -> None:
-        path = _scripts / "quality_profiles" / "python_refactor.yaml"
+        path = _REPO_ROOT / "quality_gate" / "quality_profiles" / "python_refactor.yaml"
         qc = QualityController(path, report_only=False)
         qc.profile = replace_profile_retries(qc.profile, 0)
 

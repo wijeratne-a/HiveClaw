@@ -8,11 +8,11 @@ Review stderr for JSON telemetry (torn_epoch_skip, etc.) manually for PR merges.
 Usage:
   source .venv/bin/activate
   # pheromoned must be running: make daemon-load
-  python scripts/integration_test.py
-  python scripts/integration_test.py --quick   # XPC + import only
-  python scripts/integration_test.py --stress  # + claim/release loop + swarm_spike child
-  python scripts/integration_test.py --stress --stress-max-slots 4096  # full slab gauntlet
-  python scripts/integration_test.py --batched   # read_slots / write_slots (daemon required)
+  python tests/integration_test.py
+  python tests/integration_test.py --quick   # XPC + import only
+  python tests/integration_test.py --stress  # + claim/release loop + swarm_spike child
+  python tests/integration_test.py --stress --stress-max-slots 4096  # full slab gauntlet
+  python tests/integration_test.py --batched   # read_slots / write_slots (daemon required)
 """
 
 from __future__ import annotations
@@ -157,7 +157,7 @@ def main() -> int:
             return 1
 
         sp = subprocess.Popen(
-            [py, str(repo / "scripts" / "swarm_spike.py")],
+            [py, str(repo / "internal" / "spikes" / "swarm_spike.py")],
             cwd=repo,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

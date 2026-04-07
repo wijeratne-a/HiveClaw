@@ -24,7 +24,7 @@ build-release:
 	cargo build --release -p hiveclaw-daemon
 
 poc: build
-	@echo "Phase 4: use  make daemon-load  then  python scripts/intelligence_spike.py  (see scripts/README.md)"
+	@echo "Phase 4: use  make daemon-load  then  python internal/spikes/intelligence_spike.py  (see scripts/README.md)"
 
 clean:
 	cargo clean
@@ -35,9 +35,9 @@ test-ipc:
 	# Single thread: all integration tests register the same Mach label `com.hiveclaw.pheromoned`.
 	cargo test -p hiveclaw-daemon -- --test-threads=1
 
-# MLX / numpy / psutil for scripts/intelligence_spike.py (idempotent).
+# MLX / numpy / psutil for internal/spikes (idempotent).
 spike-deps:
-	"$(MATURIN_PYTHON)" -m pip install -r "$(ROOT)/scripts/requirements-spike.txt"
+	"$(MATURIN_PYTHON)" -m pip install -r "$(ROOT)/requirements/requirements-spike.txt"
 
 # Fail fast if repo .venv exists but PYTHON points elsewhere — maturin walks parent dirs and
 # would still discover .venv, mixing PyO3/mlx builds (wrong arch or CPython version).
@@ -74,7 +74,7 @@ python-clean:
 # `make python` compiles/installs extensions only — it does not run MLX integration tests. Avoid running
 # MLX slab/LLM scripts (integration_test, test_batched_steering, spikes) while the harvester holds the GPU.
 python: spike-deps python-check-maturin
-	@PATH="$(_PY_BINDIR):$$PATH" command -v cmake >/dev/null 2>&1 || (echo >&2 "cmake not found (required for crates/hiveclaw-mlx). pip should install it: check scripts/requirements-spike.txt"; exit 1)
+	@PATH="$(_PY_BINDIR):$$PATH" command -v cmake >/dev/null 2>&1 || (echo >&2 "cmake not found (required for crates/hiveclaw-mlx). pip should install it: check requirements/requirements-spike.txt"; exit 1)
 	cd crates/hiveclaw-mlx && PATH="$(_PY_BINDIR):$$PATH" CMAKE_ARGS="-DPython_EXECUTABLE=$(MATURIN_PYTHON)" "$(MATURIN_PYTHON)" setup.py build_ext --inplace
 	@sh -c 'for f in "$(ROOT)"/crates/hiveclaw-mlx/hiveclaw_mlx_ext*.so "$(ROOT)"/crates/hiveclaw-mlx/hiveclaw_mlx_ext*.dylib; do \
 	  if [ -e "$$f" ]; then install -m644 "$$f" "$(ROOT)/crates/hiveclaw-python/python/hiveclaw_python/"; fi; \

@@ -34,7 +34,7 @@ try:
     from mlx_lm.models.cache import make_prompt_cache
 except ImportError as e:  # pragma: no cover
     raise ImportError(
-        "mlx_lm is required for generate_batch. pip install -r scripts/requirements-server.txt"
+        "mlx_lm is required for generate_batch. pip install -r requirements/requirements-server.txt"
     ) from e
 
 

@@ -36,7 +36,7 @@ class LocalSwarm:
     advanced batching and stigmergy behavior.
 
     Optional **Catenar** Proof-of-Task: set ``catenar_enabled=True`` and install the SDK
-    (see ``scripts/requirements-catenar.txt``). Each agent SSE turn emits one trace entry;
+    (see ``requirements/requirements-catenar.txt``). Each agent SSE turn emits one trace entry;
     the verifier at ``catenar_url`` must be reachable for signed receipts (local WAL still
     records traces if the network fails).
 
@@ -152,7 +152,7 @@ class LocalSwarm:
             import httpx
         except ImportError as e:
             raise RuntimeError(
-                "httpx required: pip install -r scripts/requirements-server.txt"
+                "httpx required: pip install -r requirements/requirements-server.txt"
             ) from e
 
         default_name = "hiveclaw-llama-1b"

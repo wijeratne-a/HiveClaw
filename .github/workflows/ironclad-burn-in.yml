@@ -29,8 +29,8 @@ jobs:
         run: |
           python3 -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/python -m pip install -r scripts/requirements-spike.txt
-          .venv/bin/python -m pip install -r scripts/requirements-server.txt
+          .venv/bin/python -m pip install -r requirements/requirements-spike.txt
+          .venv/bin/python -m pip install -r requirements/requirements-server.txt
 
       - name: make python (native extensions)
         run: make python PYTHON="${{ github.workspace }}/.venv/bin/python3"
@@ -41,4 +41,4 @@ jobs:
       - name: Ironclad verify (doctor + verify_burn_in)
         env:
           PYTHON: ${{ github.workspace }}/.venv/bin/python3
-        run: bash scripts/ci_ironclad_verify.sh
+        run: bash .github/scripts/ci_ironclad_verify.sh

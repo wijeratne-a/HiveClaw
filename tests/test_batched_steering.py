@@ -11,7 +11,8 @@ import io
 import sys
 from pathlib import Path
 
-_scripts_dir = Path(__file__).resolve().parent
+_REPO = Path(__file__).resolve().parents[1]
+_scripts_dir = _REPO / "scripts"
 if str(_scripts_dir) not in sys.path:
     sys.path.insert(0, str(_scripts_dir))
 
@@ -26,7 +27,7 @@ from hiveclaw_steering import (
     steer_hidden_batched,
 )
 
-SAE_PATH = _scripts_dir.parent / "models/hiveclaw_sae_v1.safetensors"
+SAE_PATH = _REPO / "models/hiveclaw_sae_v1.safetensors"
 
 # hiveclaw_layout v6: slot header `front_epoch` u32 @ +12 from slot base; stride = 128 + 2*D.
 _HCLW_GLOBAL_HDR = 4096

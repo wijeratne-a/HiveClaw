@@ -10,6 +10,28 @@
 [![macOS wheel](https://github.com/wijeratne-a/HiveClaw/actions/workflows/wheel-macos-arm64.yml/badge.svg)](https://github.com/wijeratne-a/HiveClaw/actions/workflows/wheel-macos-arm64.yml)
 [![Ironclad burn-in](https://github.com/wijeratne-a/HiveClaw/actions/workflows/ironclad-burn-in.yml/badge.svg)](https://github.com/wijeratne-a/HiveClaw/actions/workflows/ironclad-burn-in.yml)
 
+## Install
+
+**PyPI (Python package name matches [`crates/hiveclaw-python/pyproject.toml`](crates/hiveclaw-python/pyproject.toml)):**
+
+```bash
+pip install hiveclaw_python
+```
+
+**From a checkout (contributors, or when you need the daemon + native extensions built from this tree):**
+
+```bash
+pip install -e crates/hiveclaw-python
+```
+
+Run **`make python`** first so the PyO3/MLX extensions exist; full macOS setup is in [`scripts/README.md`](scripts/README.md).
+
+## Start here
+
+1. [`examples/hello_swarm.py`](examples/hello_swarm.py) — first `LocalSwarm` run (+ optional `--slab-only`).
+2. [`examples/hiveclaw_top.py`](examples/hiveclaw_top.py) — side-by-side JSON vs latent slab timing (`--mock-only` for capture). Same behavior: [`examples/speed_test_viz.py`](examples/speed_test_viz.py).
+3. **OpenAI SDK** — set `base_url` to the local gateway (snippet in the next section).
+
 ## Drop-in API (OpenAI SDK)
 
 Point any OpenAI SDK client at the local server. Swap `base_url` — no other code changes.
@@ -48,7 +70,7 @@ HiveClaw implements a **subset** of the OpenAI Chat Completions API — enough f
 
 - **Data stays on the machine** — workloads run air-gapped: no third-party API calls, no outbound JSON with your prompts to an external vendor. Ideal for regulated and privacy-sensitive environments.
 - **Hardware-native execution** — optimized for **Apple Silicon** and **Metal**; no extra hop through a shared public inference API.
-- **Verifiable output** — optional **generate → verify → repair** quality gates ([`scripts/quality_controller.py`](scripts/quality_controller.py)) enforce policy from YAML profiles ([`scripts/quality_profiles/`](scripts/quality_profiles/)) before downstream code trusts model output — the same *verifiable execution* mindset as the **Aegis Protocol**, applied to shipping systems rather than theory.
+- **Verifiable output** — optional **generate → verify → repair** quality gates ([`quality_gate/quality_controller.py`](quality_gate/quality_controller.py)) enforce policy from YAML profiles ([`quality_gate/quality_profiles/`](quality_gate/quality_profiles/)) before downstream code trusts model output — the same *verifiable execution* mindset as the **Aegis Protocol**, applied to shipping systems rather than theory.
 
 ## Performance (sample committee benchmark)
 
@@ -62,11 +84,11 @@ Synthetic multi-agent task (5 agents × 10 rounds; numbers vary by hardware and 
 Reproduce:
 
 ```bash
-pip install -r scripts/requirements-bench-langchain.txt
-python scripts/benchmark_external.py
+pip install -r requirements/requirements-bench-langchain.txt
+python benchmarks/benchmark_external.py
 ```
 
-More harnesses: [`scripts/benchmark_consensus.py`](scripts/benchmark_consensus.py), [`scripts/benchmark_stigmergy.py`](scripts/benchmark_stigmergy.py).
+More harnesses: [`benchmarks/benchmark_consensus.py`](benchmarks/benchmark_consensus.py), [`benchmarks/benchmark_stigmergy.py`](benchmarks/benchmark_stigmergy.py).
 
 ## Architecture (Phase 1) and roadmap
 
@@ -98,7 +120,7 @@ flowchart TD
 
    ```bash
    make python
-   pip install -r scripts/requirements-server.txt
+   pip install -r requirements/requirements-server.txt
    ```
 
 3. Load the IPC broker (macOS): `make daemon-load` — then `make doctor` to verify.
@@ -109,6 +131,8 @@ flowchart TD
    ```
 
 5. Call it with the OpenAI SDK (example above) or `curl` against `/v1/chat/completions`.
+
+**Daemon lifecycle:** On the normal path you should not need manual `launchctl` commands. `hc.init()` / `LocalSwarm` coordinates the broker and server subprocess flow; use [`scripts/README.md`](scripts/README.md) when debugging `pheromoned` or a stuck GUI session.
 
 **Full setup, models, troubleshooting:** [`scripts/README.md`](scripts/README.md).
 
@@ -129,18 +153,26 @@ Wheels: [`.github/workflows/wheel-macos-arm64.yml`](.github/workflows/wheel-maco
 |---------|---------|
 | [`examples/hello_swarm.py`](examples/hello_swarm.py) | First run: `LocalSwarm` + optional `--slab-only` |
 | [`examples/hiveclaw_top.py`](examples/hiveclaw_top.py) | Side-by-side terminal demo: JSON vs slab timing (`--mock-only` for screen capture) |
+| [`examples/speed_test_viz.py`](examples/speed_test_viz.py) | Alias of `hiveclaw_top` (same TUI) |
 | [`examples/local_swarm_catenar.py`](examples/local_swarm_catenar.py) | Verifiable execution (Catenar PoT) |
+| [`examples/demo_triple_threat.py`](examples/demo_triple_threat.py) | Triple-threat quality / OpenAI comparison demo |
 
 To replace the hero GIF with a recording of the real TUI: `python examples/hiveclaw_top.py --mock-only` (80×24 terminal, dark theme), then convert with [agg](https://github.com/asciinema/agg) or `ffmpeg`. See [`docs/assets/README.md`](docs/assets/README.md).
 
-## Repository layout
+## Where things live
 
 | Path | Role |
 |------|------|
-| [`crates/hiveclaw-daemon`](crates/hiveclaw-daemon) | **IPC broker daemon** (`pheromoned`) |
-| [`crates/hiveclaw-python`](crates/hiveclaw-python) | **Python SDK + OpenAI server** (`hiveclaw_python`, `hiveclaw-server`) |
-| [`scripts/`](scripts/) | **Benchmarks, quality gate, demos, burn-in** |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | **Deep-dive architecture** |
+| [`examples/`](examples/) | User-facing demos and entry scripts (`hello_swarm`, `hiveclaw_top`, `demo_triple_threat`, …). |
+| [`benchmarks/`](benchmarks/) | Committee / LangChain / stigmergy harnesses (`benchmark_*.py`). |
+| [`tests/`](tests/) | IPC integration harness and unit tests (`integration_test.py`, `test_*.py`). |
+| [`quality_gate/`](quality_gate/) | Importable quality controller, checks, and YAML profiles. |
+| [`requirements/`](requirements/) | Pinned optional dependency sets (`requirements-server.txt`, spike, bench, …). |
+| [`internal/spikes/`](internal/spikes/) | Unsupported research demos (see [`internal/spikes/README.md`](internal/spikes/README.md)). |
+| [`scripts/`](scripts/) | Server shim, doctor, burn-in, verify, dashboards, training/harvest — runtime tooling kept beside the daemon workflow. |
+| [`crates/hiveclaw-daemon`](crates/hiveclaw-daemon) | IPC broker (`pheromoned`). |
+| [`crates/hiveclaw-python`](crates/hiveclaw-python) | Python SDK + OpenAI server package (`hiveclaw_python`). |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Deep-dive architecture. |
 
 ## Licensing
 

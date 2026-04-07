@@ -19,10 +19,10 @@ otherwise Gemini if ``GEMINI_API_KEY`` or ``GOOGLE_API_KEY`` is set.
 
 Usage::
 
-  pip install -r scripts/requirements-bench-openai.txt
+  pip install -r requirements/requirements-bench-openai.txt
   python scripts/hiveclaw_server.py --host 127.0.0.1 --port 8080   # terminal A
   export GEMINI_API_KEY=...
-  python scripts/demo_triple_threat.py --cloud-provider gemini
+  python examples/demo_triple_threat.py --cloud-provider gemini
 """
 
 from __future__ import annotations
@@ -37,8 +37,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-_scripts = Path(__file__).resolve().parent
-_DEMO_TARGET = _scripts / "demo_target.py"
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+_EXAMPLES_DIR = Path(__file__).resolve().parent
+_DEMO_TARGET = _EXAMPLES_DIR / "demo_target.py"
 
 # Approximate list prices (USD per token); update when vendors change pricing.
 _GPT4O_MINI_INPUT_PER_TOKEN = 0.15 / 1_000_000
@@ -100,7 +104,7 @@ def _resolve_quality_profile(spec: str) -> Path:
     if p.is_file():
         return p.resolve()
     name = spec.removesuffix(".yaml")
-    cand = _scripts / "quality_profiles" / f"{name}.yaml"
+    cand = _REPO_ROOT / "quality_gate" / "quality_profiles" / f"{name}.yaml"
     if cand.is_file():
         return cand.resolve()
     raise SystemExit(f"Quality profile not found: {spec!r} (tried {cand})")
@@ -146,7 +150,7 @@ def _run_openai_sdk_path(
     cloud_provider: Literal["openai", "gemini"] | None,
     quality: Any | None,
 ) -> PathMetrics:
-    from quality_controller import QualityController
+    from quality_gate.quality_controller import QualityController
 
     t_wall0 = time.perf_counter()
     sum_prompt = 0
@@ -321,7 +325,7 @@ def _run_gemini_path(
     from google import genai
     from google.genai import types
 
-    from quality_controller import QualityController
+    from quality_gate.quality_controller import QualityController
 
     client = genai.Client(api_key=api_key)
     t_wall0 = time.perf_counter()
@@ -650,10 +654,10 @@ def main() -> int:
         from openai import OpenAI
     except ImportError as e:
         raise SystemExit(
-            "pip install -r scripts/requirements-bench-openai.txt"
+            "pip install -r requirements/requirements-bench-openai.txt"
         ) from e
 
-    from quality_controller import QualityController, QualityGateFailure
+    from quality_gate.quality_controller import QualityController, QualityGateFailure
 
     try:
         profile_path = _resolve_quality_profile(args.quality_profile)
@@ -715,7 +719,7 @@ def main() -> int:
                 from google import genai  # noqa: F401
             except ImportError as e:
                 raise SystemExit(
-                    "Gemini requires: pip install -r scripts/requirements-bench-openai.txt"
+                    "Gemini requires: pip install -r requirements/requirements-bench-openai.txt"
                 ) from e
             gkey = os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get(
                 "GOOGLE_API_KEY", ""

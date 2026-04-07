@@ -3,7 +3,7 @@
 Run string-passing baseline vs HiveClaw latent committee benchmark; print table + JSON.
 
 Usage:
-  python scripts/benchmark_consensus.py [--rounds 10] [--agents 5] [--tokens-per-turn 24]
+  python benchmarks/benchmark_consensus.py [--rounds 10] [--agents 5] [--tokens-per-turn 24]
       [--model MODEL_ID] [--no-hiveclaw] [--json-out path.json]
 """
 

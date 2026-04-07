@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 String-passing multi-agent baseline: coordination via growing text context (no slab).
-Used by scripts/benchmark_consensus.py — does NOT import hiveclaw_python.
+Used by benchmarks/benchmark_consensus.py — does NOT import hiveclaw_python.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ try:
     from mlx_lm.sample_utils import make_sampler
 except ImportError as e:  # pragma: no cover
     raise SystemExit(
-        "mlx_lm required: pip install -r scripts/requirements-server.txt"
+        "mlx_lm required: pip install -r requirements/requirements-server.txt"
     ) from e
 
 MODEL_ID_DEFAULT = "mlx-community/Llama-3.2-1B-Instruct-4bit"

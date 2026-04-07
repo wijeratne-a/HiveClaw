@@ -1,4 +1,4 @@
-# Phase 5: FastAPI server + TUI dashboard (install alongside scripts/requirements-spike.txt)
+# Phase 5: FastAPI server + TUI dashboard (install alongside requirements/requirements-spike.txt)
 # Phase 7: pin mlx-lm with spike; bumping major/minor mlx-lm requires re-auditing
 # docs/adr/BATCHED_STEERING_CONTRACT.md (Per-step invariant, KVCache slicing).
 fastapi>=0.111

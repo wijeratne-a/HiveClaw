@@ -19,7 +19,7 @@ try:
     from langchain_core.prompts import ChatPromptTemplate
 except ImportError as e:  # pragma: no cover
     raise SystemExit(
-        "LangChain required: pip install -r scripts/requirements-bench-langchain.txt"
+        "LangChain required: pip install -r requirements/requirements-bench-langchain.txt"
     ) from e
 
 try:
@@ -28,7 +28,7 @@ try:
     from mlx_lm.sample_utils import make_sampler
 except ImportError as e:  # pragma: no cover
     raise SystemExit(
-        "mlx_lm required: pip install -r scripts/requirements-server.txt"
+        "mlx_lm required: pip install -r requirements/requirements-server.txt"
     ) from e
 
 from string_swarm_baseline import (

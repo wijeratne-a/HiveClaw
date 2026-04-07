@@ -97,7 +97,7 @@ Batched primitives live in `crates/hiveclaw-mlx/src/slab_primitives.cpp` and hea
 
 - **Python first**, **daemon required** (real IOSurface).
 - **`integration_test.py --batched`:** smoke read/write shapes + status.
-- **`scripts/test_batched_steering.py`:** B=1 parity vs `steer_hidden`, torn row, B=2 shapes, clamp batch telemetry.
+- **`tests/test_batched_steering.py`:** B=1 parity vs `steer_hidden`, torn row, B=2 shapes, clamp batch telemetry.
 
 ## Backward compatibility
 
@@ -133,7 +133,7 @@ Batched primitives live in `crates/hiveclaw-mlx/src/slab_primitives.cpp` and hea
 ### Golden / regression tests
 
 - **Cross-bucket logits (masked batch vs B=1):** compare **fp32** logits after `mx.eval` with **`atol=5e-2`, `rtol=1e-2`** and require **greedy argmax parity** (`temperature=0`). Stricter tolerances are flaky under bf16/float16 attention.
-- **mlx-lm bump:** Re-audit this section when the pin in **`scripts/requirements-spike.txt`** / server requirements changes (KVCache API).
+- **mlx-lm bump:** Re-audit this section when the pin in **`requirements/requirements-spike.txt`** / server requirements changes (KVCache API).
 
 ### Phase 7+ — Compiled decode (default on)
 

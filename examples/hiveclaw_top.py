@@ -11,7 +11,7 @@ Run (right pane uses real SlabClient write/read; left pane still simulates JSON)
     python examples/hiveclaw_top.py
 
 Requires: macOS Apple Silicon, ``make python``, ``pheromoned`` loaded (``make daemon-load``),
-and ``pip install -r scripts/requirements-server.txt`` (for ``rich``).
+and ``pip install -r requirements/requirements-server.txt`` (for ``rich``).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ try:
     from rich.table import Table
     from rich.text import Text
 except ImportError as e:
-    print("Install rich: pip install -r scripts/requirements-server.txt", file=sys.stderr)
+    print("Install rich: pip install -r requirements/requirements-server.txt", file=sys.stderr)
     raise SystemExit(1) from e
 
 
@@ -159,7 +159,7 @@ def _run_demo(*, rounds: int, mock_only: bool) -> int:
                 time.sleep(0.35)
         console.print(
             "\n[dim]Sample benchmark (5 agents × 10 rounds): LangChain ~175.6 s / ~38k coord tokens "
-            "vs HiveClaw ~45.8 s / 0 — see README and scripts/benchmark_external.py[/dim]"
+            "vs HiveClaw ~45.8 s / 0 — see README and benchmarks/benchmark_external.py[/dim]"
         )
         return 0
 

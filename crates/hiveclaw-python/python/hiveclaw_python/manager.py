@@ -268,7 +268,7 @@ class HiveClawManager:
         except ImportError as e:
             proc.terminate()
             raise RuntimeError(
-                "httpx required for spawn_server(); pip install -r scripts/requirements-server.txt"
+                "httpx required for spawn_server(); pip install -r requirements/requirements-server.txt"
             ) from e
 
         while time.time() < deadline:

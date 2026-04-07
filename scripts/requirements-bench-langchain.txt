@@ -1,3 +1,0 @@
-# Optional deps for scripts/benchmark_external.py (LangChain orchestration baseline).
-# Use with scripts/requirements-server.txt for mlx_lm.
-langchain-core>=0.3.0

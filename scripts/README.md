@@ -1,5 +1,7 @@
 # Intelligence spike (Phase 4A)
 
+**Layout note:** benchmarks and tests moved to [`benchmarks/`](../benchmarks/) and [`tests/`](../tests/); quality gate code lives in [`quality_gate/`](../quality_gate/); pip requirement files in [`requirements/`](../requirements/); CI helpers in [`.github/scripts/`](../.github/scripts/); experimental demos in [`internal/spikes/`](../internal/spikes/). This file still documents daemon, server, and Metal workflows.
+
 **Deep-dive architecture** (IOSurface / XPC, slab v5 layout, SAE geometry, Phase 7 continuous batching, burn-in / ironclad): **[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)**. The repo **[`README.md`](../README.md)** is the product-oriented landing page. Terminal demo / hero GIF workflow: **[`examples/hiveclaw_top.py`](../examples/hiveclaw_top.py)** and **[`docs/assets/README.md`](../docs/assets/README.md)**.
 
 ## Canonical workspace (macOS Metal)

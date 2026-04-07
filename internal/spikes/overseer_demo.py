@@ -7,7 +7,7 @@ Runs in one process: two agent threads (fixed slots) + one overseer thread.
 No LLM — normalized bf16 latent goals only. Requires pheromoned + hiveclaw_python.
 
 Usage:
-  python scripts/overseer_demo.py [--ticks 80] [--tick-ms 200] [--var-threshold 1e-5] [--slots 0,1]
+  python internal/spikes/overseer_demo.py [--ticks 80] [--tick-ms 200] [--var-threshold 1e-5] [--slots 0,1]
 """
 
 from __future__ import annotations

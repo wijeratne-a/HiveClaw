@@ -3,7 +3,7 @@
 Run LangChain string committee vs HiveClaw latent committee; print table + JSON.
 
 Usage:
-  python scripts/benchmark_external.py [--rounds 10] [--agents 5] [--tokens-per-turn 24]
+  python benchmarks/benchmark_external.py [--rounds 10] [--agents 5] [--tokens-per-turn 24]
       [--model MODEL_ID] [--no-hiveclaw] [--no-langchain] [--json-out path.json]
 """
 

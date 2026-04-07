@@ -11,7 +11,7 @@ Low-level slab only (no HTTP server)::
 ## Prerequisites
 
 Requires **macOS + Apple Silicon**, ``make python``, models + SAE as in ``scripts/README.md``.
-For the default path: ``pip install -r scripts/requirements-server.txt`` (httpx, mlx-lm, FastAPI stack).
+For the default path: ``pip install -r requirements/requirements-server.txt`` (httpx, mlx-lm, FastAPI stack).
 
 **Primary:** :class:`LocalSwarm` bootstraps ``pheromoned`` and spawns ``hiveclaw_server``.
 
