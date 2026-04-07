@@ -1,0 +1,26 @@
+# Profile for triple-threat Python refactor demo (Generate → Verify → Repair).
+artifact_type: python
+fence_required: true
+max_retries: 2
+report_only: false
+py_compile: true
+ruff: true
+require_type_hints: false
+require_docstrings: false
+# If true, any warning-severity violation in warn_checks triggers RETRY (strict).
+retry_on_warn: false
+
+hard_blockers:
+  - FMT_NO_FENCE
+  - FMT_MULTIPLE_FENCES
+  - FMT_EMPTY_FENCE
+  - SYN_PARSE_ERROR
+  - SEC_EVAL_EXEC
+  - SEC_EVAL_EXEC_ATTR
+  - SEC_SUBPROCESS_SHELL_TRUE
+  - TOOL_PY_COMPILE
+
+warn_checks:
+  - TOOL_RUFF
+  - QUAL_MISSING_DOCSTRING
+  - QUAL_INCOMPLETE_TYPE_HINTS

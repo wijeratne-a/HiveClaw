@@ -95,7 +95,7 @@ kernel void read_slab_v5(
     constant uint32_t& slot_index [[buffer(3)]],
     constant SlabParams& P [[buffer(4)]],
     uint tid [[thread_index_in_threadgroup]]) {
-  constant uint OFF_S_FRONT_EPOCH = 12u;
+  uint OFF_S_FRONT_EPOCH = 12u;
   uint slot_base = P.global_hdr + slot_index * P.stride;
   threadgroup uint front_ep;
   threadgroup uint back_ep;
@@ -162,7 +162,7 @@ kernel void read_slab_v5_batched(
     constant SlabParams& P [[buffer(4)]],
     uint3 tgp [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]]) {
-  constant uint OFF_S_FRONT_EPOCH = 12u;
+  uint OFF_S_FRONT_EPOCH = 12u;
   uint b = tgp.z;
   uint slot_index = slot_indices[b];
   uint L = P.latent_elems;
@@ -252,10 +252,10 @@ kernel void write_slab_v5_batched(
     constant SlabParams& P [[buffer(4)]],
     uint3 tgp [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]]) {
-  constant uint OFF_S_CLAIM_FLAG = 0u;
-  constant uint OFF_S_FRONT_EPOCH = 12u;
-  constant uint HCLW_SLOT_STATUS_MASK = 3u;
-  constant uint HCLW_SLOT_STATUS_CLAIMED = 1u;
+  uint OFF_S_CLAIM_FLAG = 0u;
+  uint OFF_S_FRONT_EPOCH = 12u;
+  uint HCLW_SLOT_STATUS_MASK = 3u;
+  uint HCLW_SLOT_STATUS_CLAIMED = 1u;
 
   uint b = tgp.z;
   uint slot_index = slot_indices[b];

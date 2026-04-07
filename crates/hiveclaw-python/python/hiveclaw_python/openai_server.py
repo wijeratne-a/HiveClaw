@@ -575,6 +575,22 @@ async def v1_slots(request: Request) -> dict[str, Any]:
     return {"slots": slots, "count": len(slots)}
 
 
+@app.get("/v1/models")
+async def list_models() -> dict[str, Any]:
+    """OpenAI-compatible model list (Cursor and SDKs probe this before chat)."""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": DEFAULT_MODEL_NAME,
+                "object": "model",
+                "created": 0,
+                "owned_by": "hiveclaw",
+            }
+        ],
+    }
+
+
 async def _chat_completions_batched_stream(
     request: Request, body: ChatCompletionRequest
 ) -> EventSourceResponse:

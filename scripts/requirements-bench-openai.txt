@@ -1,0 +1,4 @@
+# Triple-Threat demo: HiveClaw vs cloud (scripts/demo_triple_threat.py)
+openai>=1.40.0
+google-genai>=1.0.0
+pyyaml>=6.0
