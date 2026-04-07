@@ -32,7 +32,11 @@ def _run_local_swarm() -> int:
         import hiveclaw_python as hc
     except ImportError as e:
         print("hiveclaw_python not importable:", e, file=sys.stderr)
-        print("Run from repo venv after: make python", file=sys.stderr)
+        print(
+            "From a checkout:  pip install -e crates/hiveclaw-python  &&  make python",
+            file=sys.stderr,
+        )
+        print("Then run this script from the repo root with that venv active.", file=sys.stderr)
         return 1
 
     try:

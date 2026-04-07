@@ -132,11 +132,12 @@ class HiveClawManager:
             template = self._plist_template.read_text(encoding="utf-8")
             return template.replace("@PROGRAM@", str(self._pheromoned))
         ptp = package_plist_template_path()
-        if ptp.is_file():
+        try:
             return render_plist_program(self._pheromoned)
-        raise FileNotFoundError(
-            f"Missing plist template: {self._plist_template} or {ptp}"
-        )
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"Missing plist template: {self._plist_template} or package data ({ptp})"
+            ) from e
 
     def bootstrap(
         self,

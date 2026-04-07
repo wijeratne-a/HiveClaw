@@ -4,9 +4,27 @@ from __future__ import annotations
 
 import platform
 import sys
+from importlib import resources
 from pathlib import Path
 
 _PKG_ROOT = Path(__file__).resolve().parent
+
+_PLIST_NAME = "com.hiveclaw.pheromoned.plist.in"
+
+
+def _read_plist_template_text() -> str:
+    """Load LaunchAgent template from package data (wheel-safe) or filesystem fallback."""
+    try:
+        tr = resources.files("hiveclaw_python").joinpath("data", _PLIST_NAME)
+        return tr.read_text(encoding="utf-8")
+    except (OSError, FileNotFoundError, TypeError, ValueError, ModuleNotFoundError):
+        pass
+    legacy = _PKG_ROOT / "data" / _PLIST_NAME
+    if legacy.is_file():
+        return legacy.read_text(encoding="utf-8")
+    raise FileNotFoundError(
+        f"Missing plist template: hiveclaw_python.data/{_PLIST_NAME} or {legacy}"
+    )
 
 
 def is_macos_arm64() -> bool:
@@ -33,10 +51,15 @@ def bundled_pheromoned_path() -> Path | None:
 
 
 def package_plist_template_path() -> Path:
-    return _PKG_ROOT / "data" / "com.hiveclaw.pheromoned.plist.in"
+    """Filesystem path to bundled template when present (e.g. editable install).
+
+    Prefer :func:`render_plist_program`, which uses :mod:`importlib.resources` so the
+    template loads from wheels without relying on a checkout layout.
+    """
+    return _PKG_ROOT / "data" / _PLIST_NAME
 
 
 def render_plist_program(program: Path | str) -> str:
-    """Same layout as ``crates/hiveclaw-daemon/data/com.hiveclaw.pheromoned.plist.in``."""
-    body = package_plist_template_path().read_text(encoding="utf-8")
+    """Render plist body; kept in sync with ``crates/hiveclaw-daemon/data/...plist.in`` (``make check-plist``)."""
+    body = _read_plist_template_text()
     return body.replace("@PROGRAM@", str(program))

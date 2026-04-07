@@ -28,6 +28,8 @@ Run **`make python`** first so the PyO3/MLX extensions exist; full macOS setup i
 
 ## Start here
 
+**Checkout prerequisite:** Scripts under [`examples/`](examples/) import `hiveclaw_python`. After cloning, create a venv, then run **`pip install -e crates/hiveclaw-python`** and **`make python`** (same order as in **Install** above). If you skip this, you will get `ModuleNotFoundError: No module named 'hiveclaw_python'`. PyPI-only installs (`pip install hiveclaw_python`) already expose the package, but full Metal/daemon workflows still follow [`scripts/README.md`](scripts/README.md).
+
 1. [`examples/hello_swarm.py`](examples/hello_swarm.py) — first `LocalSwarm` run (+ optional `--slab-only`).
 2. [`examples/hiveclaw_top.py`](examples/hiveclaw_top.py) — side-by-side JSON vs latent slab timing (`--mock-only` for capture). Same behavior: [`examples/speed_test_viz.py`](examples/speed_test_viz.py).
 3. **OpenAI SDK** — set `base_url` to the local gateway (snippet in the next section).
