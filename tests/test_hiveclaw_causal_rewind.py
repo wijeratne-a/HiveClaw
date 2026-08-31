@@ -82,8 +82,8 @@ class TestRewindE2E(unittest.TestCase):
         claims = rt.objects_of(ObjectKind.CLAIM)
         actions = rt.objects_of(ObjectKind.ACTION)
         tasks = rt.objects_of(ObjectKind.TASK)
-
         self.assertGreaterEqual(len(artifacts), 3, "repo, incident log, deploy (and goal)")
+        self.assertGreaterEqual(len(tasks), 2, "gap cross-check + unrelated task")
         cache_claim = self._find(claims, "cache")
         self.assertEqual(cache_claim.status, ObjectStatus.ACTIVE.value)
         conf = float(cache_claim.payload["confidence"])

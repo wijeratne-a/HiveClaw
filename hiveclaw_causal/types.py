@@ -83,6 +83,7 @@ class ArtifactKind(str, Enum):
     DEPLOY_RECORD = "deploy_record"
     PROVIDER_INCIDENT = "provider_incident"
     GOAL = "goal"
+    HEALTH_NOTE = "health_note"
 
 
 @dataclass(frozen=True)
