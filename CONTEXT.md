@@ -4,7 +4,7 @@
 
 **Canonical checkout:** `~/dev/HiveClaw` (`/Users/wijeratne/dev/HiveClaw`). Single venv: `.venv` (Python ≥ 3.11). Do not keep a second clone for day-to-day builds (`CANONICAL.md`).
 
-**Last full review:** 2026-08-30. **HEAD:** `d577ed0` on `main` (tracks `origin/main`). **This session:** Rewind causal-runtime slice — discovery complete; application code not started.
+**Last full review:** 2026-08-30. **HEAD:** local `main` ahead of `origin/main` with Rewind commits. **This session:** Rewind causal-runtime slice **complete** (e2e proven twice).
 
 ---
 
@@ -29,9 +29,9 @@ After any meaningful session:
 | Default SAE | `models/hiveclaw_sae_v1.safetensors` (2048 → 256, gitignored; present locally) |
 | License | AGPL-3.0; commercial dual-license intended |
 | Platform guard | `hiveclaw_python` raises `NotImplementedError` unless Darwin + arm64 |
-| Remote | `origin/main` at `d577ed0` |
-| Uncommitted | Demo WIP (see Working tree) + Rewind discovery docs in progress |
-| Rewind slice | Types + H5 ADR + **failing** e2e `tests/test_hiveclaw_causal_rewind.py` (2 failures: ingest creates 0 artifacts). Engine not implemented. |
+| Remote | `origin/main` at `d577ed0`; local main has Rewind commits (not pushed) |
+| Uncommitted | Demo WIP only (`demos/*`, `HEALTH_REPORT*.md`, `.DS_Store`) — leave out of Rewind commits |
+| Rewind slice | **Done (proven).** Package `hiveclaw_causal/`. E2e 2/2 twice. Demo: `python -m hiveclaw_causal.demo_rewind`. Checkpoint: `docs/research/rewind-checkpoint.md`. |
 
 ---
 
@@ -166,7 +166,7 @@ Python package: `crates/hiveclaw-python/python/hiveclaw_python/`. Console script
 | `training/` | SAE harvest + train (optional; not needed if SAE artifact exists). |
 | `internal/spikes/` | Unsupported research (`intelligence_spike`, `llm_swarm`, `swarm_spike`). |
 | `docs/` | Product-light README companion: `ARCHITECTURE.md` (lags v6), ADR. Research: `docs/research/repository-baseline.md`. |
-| `hiveclaw_causal/` | CPU-only causal runtime for The Rewind. Types landed; engine/policy pending. Must not import `hiveclaw_python`. |
+| `hiveclaw_causal/` | CPU-only causal runtime for The Rewind (SQLite H5). Must not import `hiveclaw_python`. |
 | `requirements/` | Optional dep sets (`requirements-server.txt`, spike, bench, catenar). |
 | `models/` | SAE + latent traces (safetensors/npz gitignored). |
 | `.github/` | Wheel CI (macos-arm64) + ironclad burn-in (needs self-hosted Mac). |
@@ -244,6 +244,11 @@ Daemon bootstrap from **Cursor/VS Code terminals often fails with launchctl EIO 
 Integration:
 
 ```bash
+python tests/test_hiveclaw_causal_rewind.py
+python tests/test_hiveclaw_causal_engine.py
+python tests/test_hiveclaw_causal_policy.py
+python -m hiveclaw_causal.demo_rewind
+python -m hiveclaw_causal.inspect --db output/rewind.sqlite --id action-rollback-release
 python tests/integration_test.py --quick
 python tests/integration_test.py --batched
 python tests/test_batched_steering.py          # needs daemon + SAE
@@ -288,6 +293,14 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 ---
 
 ## Session log
+
+### 2026-08-30 — Rewind slice complete
+
+- Implemented `hiveclaw_causal/` (fixture, SQLite store, invalidation engine, policy gate, Rewind orchestrator, demo CLI).
+- **Proven:** engine 5/5, policy 3/3, e2e 2/2 twice, demo `python -m hiveclaw_causal.demo_rewind`, existing quality + slab tests still pass.
+- Outage % is `stats.outage_explains_pct` (92.0 from generated timestamps at seed 42).
+- ADR `docs/adr/CAUSAL_RUNTIME_H5.md`. Checkpoint `docs/research/rewind-checkpoint.md`. Demo notes `docs/causal/rewind-demo.md`.
+- Open: SQLite trigger against event mutation; daemon crate tests not re-run; mypy not in venv.
 
 ### 2026-08-30 — Rewind e2e written (failing, as required)
 
