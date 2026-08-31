@@ -31,7 +31,7 @@ After any meaningful session:
 | Platform guard | `hiveclaw_python` raises `NotImplementedError` unless Darwin + arm64 |
 | Remote | `origin/main` at `d577ed0` |
 | Uncommitted | Demo WIP (see Working tree) + Rewind discovery docs in progress |
-| Rewind slice | **Discovery only.** No `hiveclaw_causal/` package yet. See `docs/research/repository-baseline.md`. |
+| Rewind slice | Types in `hiveclaw_causal/`; ADR `docs/adr/CAUSAL_RUNTIME_H5.md`. Engine/policy/e2e not implemented yet. |
 
 ---
 
@@ -166,7 +166,7 @@ Python package: `crates/hiveclaw-python/python/hiveclaw_python/`. Console script
 | `training/` | SAE harvest + train (optional; not needed if SAE artifact exists). |
 | `internal/spikes/` | Unsupported research (`intelligence_spike`, `llm_swarm`, `swarm_spike`). |
 | `docs/` | Product-light README companion: `ARCHITECTURE.md` (lags v6), ADR. Research: `docs/research/repository-baseline.md`. |
-| `hiveclaw_causal/` | **Planned (not in tree yet).** CPU-only causal runtime for The Rewind. Must not import `hiveclaw_python`. |
+| `hiveclaw_causal/` | CPU-only causal runtime for The Rewind. Types landed; engine/policy pending. Must not import `hiveclaw_python`. |
 | `requirements/` | Optional dep sets (`requirements-server.txt`, spike, bench, catenar). |
 | `models/` | SAE + latent traces (safetensors/npz gitignored). |
 | `.github/` | Wheel CI (macos-arm64) + ironclad burn-in (needs self-hosted Mac). |
@@ -288,6 +288,11 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 ---
 
 ## Session log
+
+### 2026-08-30 — Rewind domain types + H5 ADR
+
+- Added `hiveclaw_causal/types.py` (Artifact/Observation/Claim/…, provenance, edges, events, policy decision).
+- ADR: `docs/adr/CAUSAL_RUNTIME_H5.md` — H5 default; H1–H4 have no existing primitive in-tree.
 
 ### 2026-08-30 — Rewind discovery (no application code)
 
