@@ -31,7 +31,7 @@ After any meaningful session:
 | Platform guard | `hiveclaw_python` raises `NotImplementedError` unless Darwin + arm64 |
 | Remote | `origin/main` at `d577ed0` |
 | Uncommitted | Demo WIP (see Working tree) + Rewind discovery docs in progress |
-| Rewind slice | Types in `hiveclaw_causal/`; ADR `docs/adr/CAUSAL_RUNTIME_H5.md`. Engine/policy/e2e not implemented yet. |
+| Rewind slice | Types + H5 ADR + **failing** e2e `tests/test_hiveclaw_causal_rewind.py` (2 failures: ingest creates 0 artifacts). Engine not implemented. |
 
 ---
 
@@ -288,6 +288,12 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 ---
 
 ## Session log
+
+### 2026-08-30 — Rewind e2e written (failing, as required)
+
+- `tests/test_hiveclaw_causal_rewind.py` asserts ingest → inject → invalidation → policy → computed %.
+- Stubs: `hiveclaw_causal/rewind.py`, `fixture.py` (empty failures).
+- **Verified failure:** 2 failed. Scenario: `0 not >= 3` artifacts. Twice-test: empty claims. Not ImportError.
 
 ### 2026-08-30 — Rewind domain types + H5 ADR
 
