@@ -20,3 +20,6 @@ com.hiveclaw.pheromoned.plist
 
 # Local harvester nohup log
 harvester.log
+
+# Rewind demo SQLite
+output/
