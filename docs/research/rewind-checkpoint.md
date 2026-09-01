@@ -2,8 +2,76 @@
 
 Distinguish **proven** (command ran) vs **implemented but not separately measured**.
 
-**HEAD at start of Session 2:** `b456a74`  
-**This file:** Session 2 (2026-08-31) update of the Session 1 (2026-08-30) checkpoint. Not a new file.
+**HEAD at start of Session 3:** `fd1cb35` (`origin/main` after Session 2).  
+**This file:** Session 3 (2026-08-31) update. Not a new file.
+
+---
+
+## Session 3 — 2026-08-31 (CI gate + first stigmergy benchmark)
+
+Interpreter: `/Users/wijeratne/dev/HiveClaw/.venv/bin/python` (3.11.1).
+
+### Definition of done
+
+| Item | Status |
+|------|--------|
+| `make test-causal` + CI job | **Proven.** Target runs unittest `test_hiveclaw_causal_*.py` + mypy on `hiveclaw_causal`. Workflow `.github/workflows/causal.yml` (`ubuntu-latest`, no GPU). |
+| Gate fails on a broken test then passes | **Proven.** Injected `self.fail('CI-gate probe: intentional failure')` → `FAILED (failures=1)`, make exit 2. Revert → 13/13 then 14/14 OK after Part 2. |
+| Naive full-rerun path exists | **Proven.** `repair="naive"` actually inspects/touches every object; not a mocked count. |
+| Comparison table | **Proven.** `python -m hiveclaw_causal.benchmark` twice. |
+| Experiment log | **Written.** `docs/research/experiments/exp-001-targeted-vs-full-rerun.md` |
+| Demo WIP untouched | **Confirmed** (`git status` still shows `demos/*`, `HEALTH_REPORT*.md`, `.DS_Store` only as leftover). |
+| Pushed | Recorded after `git push` (see git hygiene). |
+
+### Part 1 — `make test-causal`
+
+Daemon was still `state = running` after `make daemon-unload` from this terminal (launchctl). Suite does **not** import `hiveclaw_python` / mlx / XPC (`grep` only comments). 13 tests OK + mypy 16 files before Part 2.
+
+**Fail probe (store insert test):**
+
+```
+FAIL: test_insert_events_still_succeeds ... AssertionError: CI-gate probe: intentional failure
+Ran 13 tests in 0.157s
+FAILED (failures=1)
+make: *** [test-causal] Error 1
+```
+
+Revert: 13 passed, mypy clean.
+
+CI: `.github/workflows/causal.yml` — `on: push` and `pull_request`, job `test-causal`, `pip install mypy`, `make test-causal PYTHON=python3`. First live Actions run is after push (not executed inside this agent session).
+
+Commit: `b1b3a50` `ci: add make test-causal and a CPU-only GitHub Actions job`
+
+### Part 2 — exact numbers (no inflation)
+
+`python -m hiveclaw_causal.benchmark` seed 42, two runs. Same conclusion: **support_pct 92.0**, rollback blocked, follow-up present.
+
+| metric | targeted | naive |
+|--------|----------|-------|
+| objects_before | 12 | 12 |
+| objects_after | 19 | 19 |
+| objects_touched | 9 | 19 |
+| objects_untouched | 10 | 0 |
+| eval_steps | 7 | 19 |
+| wall_s run 1 | 0.007147 | 0.006705 |
+| wall_s run 2 | 0.007333 | 0.006677 |
+
+Targeted left 10 objects untouched (listed in exp-001). Naive left 0.
+
+Wall-clock: naive was slightly **faster** (~0.6 ms). Fixture is too small for a latency claim. Keep targeted for fewer eval steps; do not advertise speed.
+
+After Part 2: `make test-causal` → **14 tests OK**, mypy **19 files**.
+
+Commit: `4fe3c6d` `feat: measure targeted Rewind repair against a naive full rerun`
+
+### What is implemented but unverified
+
+- GitHub Actions `causal.yml` has not been observed green on github.com in this session (only local make).
+- Wall-clock is not a stable metric at ~7 ms.
+
+### Single next highest-value step
+
+Watch the first `Causal runtime` Actions run on `main`. If green, scale the fixture (more unrelated claims/tasks) until wall-clock or eval_steps show a gap a reviewer would care about — or accept that this N=12 graph is only a skip-list demo.
 
 ---
 

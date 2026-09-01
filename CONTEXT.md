@@ -4,7 +4,7 @@
 
 **Canonical checkout:** `~/dev/HiveClaw` (`/Users/wijeratne/dev/HiveClaw`). Single venv: `.venv` (Python ≥ 3.11). Do not keep a second clone for day-to-day builds (`CANONICAL.md`).
 
-**Last full review:** 2026-08-31. **HEAD:** local `main` with Rewind + Session 2 harden commits. **This session:** DB append-only triggers proven; daemon crate tests + causal mypy recorded; slab wiring deferred.
+**Last full review:** 2026-08-31 Session 3. **HEAD:** local `main` with `test-causal` CI + targeted-vs-naive benchmark (not yet pushed at this edit).
 
 ---
 
@@ -29,9 +29,9 @@ After any meaningful session:
 | Default SAE | `models/hiveclaw_sae_v1.safetensors` (2048 → 256, gitignored; present locally) |
 | License | AGPL-3.0; commercial dual-license intended |
 | Platform guard | `hiveclaw_python` raises `NotImplementedError` unless Darwin + arm64 |
-| Remote | `origin/main` at `469796c` (Rewind + Session 2 harden pushed 2026-08-31) |
+| Remote | Session 3 commits (`b1b3a50`, `4fe3c6d`) local until push |
 | Uncommitted | Demo WIP only (`demos/*`, `HEALTH_REPORT*.md`, `.DS_Store`) — leave out of Rewind commits |
-| Rewind slice | **Done (proven)** + Session 2 harden: `events` UPDATE/DELETE aborted by SQLite triggers; causal mypy clean; daemon `ipc_test` 5/5. Slab wiring **deferred**. Checkpoint: `docs/research/rewind-checkpoint.md`. |
+| Rewind slice | Session 3: `make test-causal` + `.github/workflows/causal.yml`. Benchmark: targeted **9/19** objects touched, **7** eval steps vs naive **19/19**, **19** steps; both 92.0% / rollback blocked. Wall-clock not a win. `docs/research/experiments/exp-001-targeted-vs-full-rerun.md`. |
 
 ---
 
@@ -230,11 +230,13 @@ Always from repo root, venv active. If `.venv` exists: `make python PYTHON="$(pw
 
 ```bash
 source .venv/bin/activate
+make test-causal PYTHON="$(pwd)/.venv/bin/python3"   # CPU only: hiveclaw_causal unittest + mypy
 make python PYTHON="$(pwd)/.venv/bin/python3"   # PyO3 + mlx ext only; does not run tests
 make daemon-load                                 # build release pheromoned + launchctl
 make doctor
 make daemon-status                               # program must be this checkout's target/release/pheromoned
 hiveclaw-server --host 127.0.0.1 --port 8080
+python -m hiveclaw_causal.benchmark              # targeted vs naive full rerun
 ```
 
 Daemon bootstrap from **Cursor/VS Code terminals often fails with launchctl EIO 5**. Use **Terminal.app**. `make daemon-load` treats EIO as OK if the job is already running with this binary.
@@ -294,6 +296,12 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 
 ## Session log
 
+### 2026-08-31 — Session 3 CI + targeted vs naive
+
+- Part 1: `make test-causal` + `causal.yml`. Probe failure then revert. 13 tests → 14 after Part 2.
+- Part 2: naive path is a real full scan. Targeted 9 touched / 7 evals vs naive 19 / 19. Wall-clock ~7 ms, naive slightly faster. Keep targeted; no latency claim.
+- Demo WIP left unstaged.
+
 ### 2026-08-31 — Session 2 harden Rewind
 
 - **P1 proven:** raw `UPDATE`/`DELETE` on `events` raised nothing; triggers added; store 3/3 + engine/policy/e2e still green.
@@ -345,3 +353,5 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 - Python package: `crates/hiveclaw-python/README-PYTHON.md`
 - Demos: `demos/README.md`
 - Spikes: `internal/spikes/README.md`
+- Causal CI: `.github/workflows/causal.yml` (`make test-causal`)
+- Targeted vs naive: `docs/research/experiments/exp-001-targeted-vs-full-rerun.md`
