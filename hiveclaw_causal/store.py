@@ -17,6 +17,7 @@ from .types import (
     Provenance,
     Record,
     SourceRef,
+    TaskStatus,
     TrustClass,
 )
 
@@ -83,8 +84,10 @@ class Store:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path))
+        self._conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=8000")
         self._init_schema()
 
     def close(self) -> None:
@@ -161,6 +164,7 @@ class Store:
         edge_id: str | None = None,
         rule: str | None = None,
         payload: dict[str, Any] | None = None,
+        commit: bool = True,
     ) -> CausalEvent:
         cur = self._conn.cursor()
         cur.execute(
@@ -181,7 +185,8 @@ class Store:
                 _json(payload or {}),
             ),
         )
-        self._conn.commit()
+        if commit:
+            self._conn.commit()
         seq = cur.lastrowid
         if seq is None:
             raise RuntimeError("INSERT INTO events did not produce lastrowid")
@@ -377,6 +382,97 @@ class Store:
     def all_events(self) -> list[CausalEvent]:
         rows = self._conn.execute("SELECT * FROM events ORDER BY seq").fetchall()
         return [self._row_to_event(r) for r in rows]
+
+    def try_lease_one_task(self, worker_id: str, ts: str) -> Record | None:
+        """Atomically lease one pending task. Workers share only this SQLite file."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._conn.execute(
+                """
+                SELECT * FROM objects
+                WHERE kind = ? AND status = ?
+                ORDER BY id
+                LIMIT 1
+                """,
+                (ObjectKind.TASK.value, TaskStatus.PENDING.value),
+            ).fetchone()
+            if row is None:
+                self._conn.rollback()
+                return None
+            rec = self._row_to_record(row)
+            payload = {**rec.payload, "lease_owner": worker_id}
+            cur = self._conn.execute(
+                """
+                UPDATE objects SET status = ?, payload = ?, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    TaskStatus.LEASED.value,
+                    _json(payload),
+                    ts,
+                    rec.id,
+                    TaskStatus.PENDING.value,
+                ),
+            )
+            if cur.rowcount != 1:
+                self._conn.rollback()
+                return None
+            self.append_event(
+                ts=ts,
+                event_type="lease_task",
+                object_id=rec.id,
+                reason=f"leased by {worker_id}",
+                old_status=TaskStatus.PENDING.value,
+                new_status=TaskStatus.LEASED.value,
+                payload={"lease_owner": worker_id},
+                commit=False,
+            )
+            self._conn.commit()
+            rec.status = TaskStatus.LEASED.value
+            rec.payload = payload
+            rec.updated_at = ts
+            return rec
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def complete_task(self, task_id: str, worker_id: str, ts: str) -> Record:
+        rec = self.get(task_id)
+        if rec.kind != ObjectKind.TASK:
+            raise ValueError(f"{task_id} is not a task")
+        if rec.status != TaskStatus.LEASED.value:
+            raise ValueError(f"{task_id} status {rec.status} is not leased")
+        if rec.payload.get("lease_owner") != worker_id:
+            raise ValueError(f"{task_id} owned by {rec.payload.get('lease_owner')} not {worker_id}")
+        payload = {**rec.payload, "completed_by": worker_id}
+        cur = self._conn.execute(
+            """
+            UPDATE objects SET status = ?, payload = ?, updated_at = ?
+            WHERE id = ? AND status = ?
+            """,
+            (
+                TaskStatus.DONE.value,
+                _json(payload),
+                ts,
+                task_id,
+                TaskStatus.LEASED.value,
+            ),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError(f"lost lease on {task_id}")
+        self.append_event(
+            ts=ts,
+            event_type="complete_task",
+            object_id=task_id,
+            reason=f"completed by {worker_id}",
+            old_status=TaskStatus.LEASED.value,
+            new_status=TaskStatus.DONE.value,
+            payload={"lease_owner": worker_id},
+        )
+        rec.status = TaskStatus.DONE.value
+        rec.payload = payload
+        rec.updated_at = ts
+        return rec
 
     def _row_to_record(self, row: sqlite3.Row) -> Record:
         return Record(
