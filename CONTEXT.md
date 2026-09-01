@@ -4,7 +4,7 @@
 
 **Canonical checkout:** `~/dev/HiveClaw` (`/Users/wijeratne/dev/HiveClaw`). Single venv: `.venv` (Python ≥ 3.11). Do not keep a second clone for day-to-day builds (`CANONICAL.md`).
 
-**Last full review:** 2026-08-30. **HEAD:** local `main` ahead of `origin/main` with Rewind commits. **This session:** Rewind causal-runtime slice **complete** (e2e proven twice).
+**Last full review:** 2026-08-31. **HEAD:** local `main` with Rewind + Session 2 harden commits. **This session:** DB append-only triggers proven; daemon crate tests + causal mypy recorded; slab wiring deferred.
 
 ---
 
@@ -19,7 +19,7 @@ After any meaningful session:
 
 ---
 
-## Snapshot (2026-08-30)
+## Snapshot (2026-08-31)
 
 | Item | State |
 |------|--------|
@@ -29,9 +29,9 @@ After any meaningful session:
 | Default SAE | `models/hiveclaw_sae_v1.safetensors` (2048 → 256, gitignored; present locally) |
 | License | AGPL-3.0; commercial dual-license intended |
 | Platform guard | `hiveclaw_python` raises `NotImplementedError` unless Darwin + arm64 |
-| Remote | `origin/main` at `d577ed0`; local main has Rewind commits (not pushed) |
+| Remote | Session 2 pushes Rewind commits to `origin/main` after P1/P2 green |
 | Uncommitted | Demo WIP only (`demos/*`, `HEALTH_REPORT*.md`, `.DS_Store`) — leave out of Rewind commits |
-| Rewind slice | **Done (proven).** Package `hiveclaw_causal/`. E2e 2/2 twice. Demo: `python -m hiveclaw_causal.demo_rewind`. Checkpoint: `docs/research/rewind-checkpoint.md`. |
+| Rewind slice | **Done (proven)** + Session 2 harden: `events` UPDATE/DELETE aborted by SQLite triggers; causal mypy clean; daemon `ipc_test` 5/5. Slab wiring **deferred**. Checkpoint: `docs/research/rewind-checkpoint.md`. |
 
 ---
 
@@ -271,9 +271,9 @@ bash .github/scripts/ci_ironclad_verify.sh     # heavy; self-hosted Mac
 
 ---
 
-## Working tree (as of 2026-08-30)
+## Working tree (as of 2026-08-31)
 
-Clean **committed** main is Repo Pulse (`d577ed0`). **Uncommitted / untracked** (do not discard blindly):
+Rewind + Session 2 harden commits are on `main`. **Uncommitted / untracked** (do not discard blindly; not part of causal-runtime):
 
 - Modified: `demos/README.md`, `demos/audit_swarm.py`, `demos/baseline_audit.py`, `demos/run_repo_pulse.py`
 - Untracked: `demos/consensus_showdown.py`, `demos/health_report_validate.py`, `demos/json_utils.py`, `demos/llm_ab.py`, `demos/llm_client.py`
@@ -294,13 +294,20 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 
 ## Session log
 
+### 2026-08-31 — Session 2 harden Rewind
+
+- **P1 proven:** raw `UPDATE`/`DELETE` on `events` raised nothing; triggers added; store 3/3 + engine/policy/e2e still green.
+- **P2 proven:** `cargo test -p hiveclaw-daemon -- --test-threads=1` → ipc 5/5 + phase_c stub 1/1. mypy on `hiveclaw_causal` had `lastrowid` None (fixed); quality_gate 4 errors are pre-existing. Reloaded `pheromoned` after crate tests unloaded it.
+- **P3 deferred:** Rewind does not need IOSurface wiring; no named consumer. Reasoning in checkpoint.
+- Demo WIP left unstaged.
+
 ### 2026-08-30 — Rewind slice complete
 
 - Implemented `hiveclaw_causal/` (fixture, SQLite store, invalidation engine, policy gate, Rewind orchestrator, demo CLI).
 - **Proven:** engine 5/5, policy 3/3, e2e 2/2 twice, demo `python -m hiveclaw_causal.demo_rewind`, existing quality + slab tests still pass.
 - Outage % is `stats.outage_explains_pct` (92.0 from generated timestamps at seed 42).
 - ADR `docs/adr/CAUSAL_RUNTIME_H5.md`. Checkpoint `docs/research/rewind-checkpoint.md`. Demo notes `docs/causal/rewind-demo.md`.
-- Open: SQLite trigger against event mutation; daemon crate tests not re-run; mypy not in venv.
+- Open as of Session 1 (closed in Session 2): SQLite trigger, daemon crate tests, mypy on `hiveclaw_causal`. Slab wiring still deferred.
 
 ### 2026-08-30 — Rewind e2e written (failing, as required)
 

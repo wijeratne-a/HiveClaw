@@ -8,7 +8,7 @@
 
 Implement **H5 hybrid** for the Rewind slice:
 
-1. **Append-only event log** (SQLite `events` table, `INSERT` only — never `UPDATE`/`DELETE` events).
+1. **Append-only event log** (SQLite `events` table, `INSERT` only — never `UPDATE`/`DELETE` events). Session 2: `BEFORE UPDATE`/`BEFORE DELETE` triggers `RAISE(ABORT)` so this is a DB invariant, not only a Python convention (`tests/test_hiveclaw_causal_store.py`).
 2. **Current-state records** (SQLite `objects` projection of the log).
 3. **Indexed reverse-dependency lookup** (`deps_by_target`: given evidence/object id, who depends on it and with which edge/rule).
 4. **Task queue with leases** (`tasks.lease_owner`, `lease_until`).
