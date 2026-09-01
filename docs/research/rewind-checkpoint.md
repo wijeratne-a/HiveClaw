@@ -2,8 +2,58 @@
 
 Distinguish **proven** (command ran) vs **implemented but not separately measured**.
 
-**HEAD at start of Session 3:** `fd1cb35` (`origin/main` after Session 2).  
-**This file:** Session 3 (2026-08-31) update. Not a new file.
+**HEAD at start of Session 4:** `368b330` on `origin/main`.  
+**This file:** Session 4 (2026-08-31) update. Not a new file.
+
+---
+
+## Session 4 — 2026-08-31 (CI confirm + scale + concurrent leases)
+
+### Part 1 — GitHub Actions (watched, not assumed)
+
+| Field | Value |
+|-------|--------|
+| Workflow | Causal runtime |
+| Run | https://github.com/wijeratne-a/HiveClaw/actions/runs/33478599893 |
+| Conclusion | **success** |
+| Event | push `main` |
+| SHA | `368b3304223585feb8d7748cd404f094e17bf488` |
+| Job `test-causal` | started 2026-09-01T06:40:14Z, completed 2026-09-01T06:40:26Z (~12 s) |
+| Steps | checkout, setup-python, install mypy, **make test-causal success** |
+
+Did not proceed to Part 2 until this URL returned `conclusion=success`.
+
+### Part 2 — exp-002 scale table (this machine, seed 42, two runs)
+
+| N before | touched t/n | eval t/n | wall_s run1 t/n | wall_s run2 t/n |
+|----------|-------------|----------|-----------------|-----------------|
+| 12 | 9 / 19 | 7 / 19 | 0.007134 / 0.007175 | 0.006982 / 0.006677 |
+| 100 | 10 / 107 | 38 / 109 | 0.008567 / 0.009886 | 0.007753 / 0.010071 |
+| 500 | 11 / 507 | 173 / 511 | 0.012144 / 0.019063 | 0.013902 / 0.019323 |
+
+Both paths: 92.0% support, rollback blocked, follow-up present. Wall-clock gap is absent at N=12, present at N=100 and N=500 (~6–7 ms at 500). Targeted eval_steps still grow with task count (inspect-all-tasks to skip). Details: `docs/research/experiments/exp-002-scale-targeted-vs-naive.md`.
+
+### Part 3 — exp-003 concurrent leases
+
+`python tests/test_hiveclaw_causal_lease.py -v` → 2/2 in 1.612s.
+
+- 2 processes drain Rewind pending tasks after provider injection: no duplicate ids; all `done`.
+- 5 processes vs 3 tasks × 8 trials: **0 double-lease**, **0 dropped**.
+
+Primitive: WAL + `BEGIN IMMEDIATE` + `UPDATE … WHERE status=pending`. Workers share only the db path. Not a multi-host proof. `docs/research/experiments/exp-003-concurrent-leases.md`.
+
+### Local suite after Session 4
+
+`make test-causal` → **17 tests OK**, mypy 21 files.
+
+### What is unverified
+
+- New CI run for `09ff106` / `1ed5036` not watched yet (will fire on push).
+- Lease test is 8 oversubscribed trials, not an exhaustive race model.
+
+### Next highest-value step
+
+Watch the Session 4 Causal runtime Actions run. Then either more lease trials under load, or stop calling SQLite workers “stigmergy” until a second machine/process isolation story exists.
 
 ---
 

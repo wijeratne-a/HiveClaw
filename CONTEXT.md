@@ -4,7 +4,7 @@
 
 **Canonical checkout:** `~/dev/HiveClaw` (`/Users/wijeratne/dev/HiveClaw`). Single venv: `.venv` (Python ≥ 3.11). Do not keep a second clone for day-to-day builds (`CANONICAL.md`).
 
-**Last full review:** 2026-08-31 Session 3. **HEAD:** local `main` with `test-causal` CI + targeted-vs-naive benchmark (not yet pushed at this edit).
+**Last full review:** 2026-08-31 Session 4.
 
 ---
 
@@ -29,9 +29,9 @@ After any meaningful session:
 | Default SAE | `models/hiveclaw_sae_v1.safetensors` (2048 → 256, gitignored; present locally) |
 | License | AGPL-3.0; commercial dual-license intended |
 | Platform guard | `hiveclaw_python` raises `NotImplementedError` unless Darwin + arm64 |
-| Remote | Session 3 commits (`b1b3a50`, `4fe3c6d`) local until push |
+| Remote | `origin/main` at `368b330` (Session 3); Session 4 commits local until push |
 | Uncommitted | Demo WIP only (`demos/*`, `HEALTH_REPORT*.md`, `.DS_Store`) — leave out of Rewind commits |
-| Rewind slice | Session 3: `make test-causal` + `.github/workflows/causal.yml`. Benchmark: targeted **9/19** objects touched, **7** eval steps vs naive **19/19**, **19** steps; both 92.0% / rollback blocked. Wall-clock not a win. `docs/research/experiments/exp-001-targeted-vs-full-rerun.md`. |
+| Rewind slice | CI green: https://github.com/wijeratne-a/HiveClaw/actions/runs/33478599893 . exp-002: N=12/100/500; at 500 touched 11 vs 507, wall ~13 vs ~19 ms. exp-003: 5 workers × 3 tasks × 8 trials, 0 double-lease. |
 
 ---
 
@@ -296,6 +296,13 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 
 ## Session log
 
+### 2026-08-31 — Session 4 CI confirm, scale, leases
+
+- CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33478599893 success (~12s job, `368b330`).
+- exp-002: N=12/100/500. Wall-clock gap from N=100; at 500 ~12–14 vs ~19 ms. Touched 11 vs 507.
+- exp-003: process leases, 5 workers / 3 tasks / 8 trials, 0 double-lease, 0 dropped.
+- Demo WIP left unstaged.
+
 ### 2026-08-31 — Session 3 CI + targeted vs naive
 
 - Part 1: `make test-causal` + `causal.yml`. Probe failure then revert. 13 tests → 14 after Part 2.
@@ -355,3 +362,5 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 - Spikes: `internal/spikes/README.md`
 - Causal CI: `.github/workflows/causal.yml` (`make test-causal`)
 - Targeted vs naive: `docs/research/experiments/exp-001-targeted-vs-full-rerun.md`
+- Scaled benchmark: `docs/research/experiments/exp-002-scale-targeted-vs-naive.md`
+- Concurrent leases: `docs/research/experiments/exp-003-concurrent-leases.md`
