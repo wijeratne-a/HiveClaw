@@ -21,7 +21,7 @@ mypy: system `/Library/Frameworks/Python.framework/Versions/3.11/bin/mypy` 1.20.
 | Daemon crate tests with recorded output | **Proven.** `cargo test -p hiveclaw-daemon -- --test-threads=1` → ipc 5/5, phase_c stub 1/1, lib/bin/doctest 0 tests. Boot-out EIO 5 on launchctl (same as IDE/GUI domain noise); tests still **ok** |
 | mypy recorded; new vs pre-existing | **Proven.** `hiveclaw_causal` + causal tests: 1 new error (`lastrowid` None) → fixed → **Success: no issues found in 16 source files**. `quality_gate`: 4 **pre-existing** errors (`yaml` stubs, assignment, AST vs Module). No CI mypy job |
 | IOSurface slab wiring | **Deferred** (see Priority 3 below). No implementation this session |
-| Rewind commits pushed | Recorded after push in git hygiene below |
+| Rewind commits pushed | **Proven.** `git push origin HEAD` → `d577ed0..469796c  HEAD -> main` |
 | `demos/*` / `HEALTH_REPORT*.md` untouched | **Confirmed** at commit time: only causal store/test/docs in Session 2 commits |
 
 ### Priority 1 — append-only at the DB
@@ -76,7 +76,7 @@ Commit: `42a759f` `fix: handle sqlite lastrowid None in causal event append`
 
 ### Git hygiene
 
-Session 2 commits (causal only): `19a112b`, `42a759f`, plus this docs commit. Unrelated unstaged WIP left as-is: `demos/*`, `HEALTH_REPORT*.md`, `.DS_Store`.
+Session 2 commits (causal only): `19a112b`, `42a759f`, `469796c`. Pushed with Session 1 Rewind history: `d577ed0..469796c` on `origin/main`. Unrelated unstaged WIP left as-is: `demos/*`, `HEALTH_REPORT*.md`, `.DS_Store`.
 
 ### What is implemented but unverified
 

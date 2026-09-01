@@ -29,7 +29,7 @@ After any meaningful session:
 | Default SAE | `models/hiveclaw_sae_v1.safetensors` (2048 → 256, gitignored; present locally) |
 | License | AGPL-3.0; commercial dual-license intended |
 | Platform guard | `hiveclaw_python` raises `NotImplementedError` unless Darwin + arm64 |
-| Remote | Session 2 pushes Rewind commits to `origin/main` after P1/P2 green |
+| Remote | `origin/main` at `469796c` (Rewind + Session 2 harden pushed 2026-08-31) |
 | Uncommitted | Demo WIP only (`demos/*`, `HEALTH_REPORT*.md`, `.DS_Store`) — leave out of Rewind commits |
 | Rewind slice | **Done (proven)** + Session 2 harden: `events` UPDATE/DELETE aborted by SQLite triggers; causal mypy clean; daemon `ipc_test` 5/5. Slab wiring **deferred**. Checkpoint: `docs/research/rewind-checkpoint.md`. |
 
