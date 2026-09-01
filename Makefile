@@ -1,5 +1,5 @@
 # HiveClaw — Phase 4: XPC Mach service + IOSurface + PyO3.
-.PHONY: build build-release poc clean test-ipc python python-clean python-check-maturin spike-deps daemon-load daemon-unload daemon-uninstall daemon-status doctor check-plist
+.PHONY: build build-release poc clean test-ipc test-causal python python-clean python-check-maturin spike-deps daemon-load daemon-unload daemon-uninstall daemon-status doctor check-plist
 
 ROOT := $(abspath .)
 PBIN := $(ROOT)/target/release/pheromoned
@@ -35,6 +35,21 @@ clean:
 test-ipc:
 	# Single thread: all integration tests register the same Mach label `com.hiveclaw.pheromoned`.
 	cargo test -p hiveclaw-daemon -- --test-threads=1
+
+# CPU-only causal runtime (no daemon, GPU, mlx, or hiveclaw_python).
+# Local: make test-causal PYTHON=$(pwd)/.venv/bin/python3
+# CI:    pip install mypy && make test-causal PYTHON=python3
+test-causal:
+	@cd "$(ROOT)" && "$(MATURIN_PYTHON)" -m unittest discover -s tests -p 'test_hiveclaw_causal_*.py' -v
+	@if "$(MATURIN_PYTHON)" -c "import mypy" >/dev/null 2>&1; then \
+	  cd "$(ROOT)" && "$(MATURIN_PYTHON)" -m mypy hiveclaw_causal tests/test_hiveclaw_causal_*.py ; \
+	elif command -v mypy >/dev/null 2>&1; then \
+	  cd "$(ROOT)" && mypy --python-executable "$(MATURIN_PYTHON)" hiveclaw_causal tests/test_hiveclaw_causal_*.py ; \
+	else \
+	  echo >&2 "mypy is required for make test-causal. Install: python -m pip install mypy"; \
+	  exit 1; \
+	fi
+	@echo "OK: test-causal (unittest + mypy hiveclaw_causal)"
 
 # MLX / numpy / psutil for internal/spikes (idempotent).
 spike-deps:

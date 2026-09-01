@@ -1,0 +1,25 @@
+# CPU-only causal runtime. No GPU, daemon, Metal, or mlx.
+# Catches hiveclaw_causal regressions on every push without macOS runners.
+name: Causal runtime
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-causal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install mypy
+        run: python -m pip install --upgrade pip mypy
+
+      - name: make test-causal
+        run: make test-causal PYTHON=python3
