@@ -2,16 +2,14 @@
 
 ## Executive result
 
-**PARTIAL** — repository changes are in place and locally validated. GitHub Actions confirmation of the Node.js 20 annotation is recorded after the push of this work (see Validation).
+**COMPLETE**
 
-- **Node.js 20 warning:** classified as `resolved_by_SHA_pinned_supported_action`. Causal CI previously used `actions/checkout@v4` and `actions/setup-python@v5` (`runs.using: node20`). Those are upgraded to checkout v7.0.1 and setup-python v7.0.0 (`runs.using: node24`) and pinned to verified commit SHAs. `actions/setup-node` was not added; this repository does not run Node/npm tooling.
-- **Causal CI still runs** the same command: `make test-causal PYTHON=python3`.
-- **Causal logic / test thresholds / fixtures / expected values:** unchanged.
+- **Node.js 20 warning:** **removed** on the causal job. Verdict: `resolved_by_SHA_pinned_supported_action`. Causal CI previously used `actions/checkout@v4` and `actions/setup-python@v5` (`runs.using: node20`). Those are upgraded to checkout v7.0.1 and setup-python v7.0.0 (`runs.using: node24`) and pinned to verified commit SHAs. `actions/setup-node` was not added; this repository does not run Node/npm tooling. A nested Node 20 notice remains on the unrelated wheel job (cibuildwheel v2.22.0 still calls `setup-python@v5` internally).
+- **Causal CI still runs and passes:** GitHub Actions run `33480991386` job `test-causal` success; step `make test-causal` success; **0 annotations**.
+- **Causal logic / test thresholds / fixtures / expected values:** unchanged (`false`).
 - **Workflow permissions:** verified and narrowed to `contents: read` (wheel job additionally needs `actions: write` for artifact upload; documented below).
 - **Official actions:** upgraded where needed for Node 24 and pinned to 40-character SHAs with version comments.
 - **Dependency caching:** none on the causal job (no lockfile for the mypy install). A cache miss/hit therefore cannot change the tested environment.
-
-Do not treat this report as **COMPLETE** until the post-change GitHub Actions run is recorded in Validation and the Node annotation comparison is filled in.
 
 ## Baseline
 
@@ -144,15 +142,27 @@ Same pass/fail semantics as CI: unittest discover of `test_hiveclaw_causal_*.py`
 
 ### GitHub Actions validation
 
-Filled in after push of the hardening commit:
+Hardening commit `27bb7ebccb5b5acbdc43df29f80b0d3b4c2c8877` on `main` (push triggered both causal and wheel because the wheel workflow file itself is in that workflow’s path filter).
 
 ```
-run URL/ID:     (pending)
-commit SHA:     (pending)
-job result:     (pending)
-duration:       (pending)
-annotations:    (pending comparison vs Node 20 warning on 33478599893)
+causal run URL:   https://github.com/wijeratne-a/HiveClaw/actions/runs/33480991386
+causal run ID:    33480991386
+commit SHA:       27bb7ebccb5b5acbdc43df29f80b0d3b4c2c8877
+job:              test-causal
+job result:       success
+job URL:          https://github.com/wijeratne-a/HiveClaw/actions/runs/33480991386/job/99770341646
+duration:         2026-09-01T07:12:06Z → 2026-09-01T07:12:18Z (~12 s; same as baseline ~12 s)
+test step:        "make test-causal" success (not setup-only)
+annotations after: 0
+annotations before: Node.js 20 is deprecated. ... actions/checkout@v4, actions/setup-python@v5
+                    (check-run 99763010423 on run 33478599893)
+sensitive logs:   job API lists only version-echo / pip / make steps; logs endpoint is auth-gated (403 unauthenticated)
 ```
+
+Wheel job on the same commit also succeeded (`33480991417`, ~62 s) with two residual warnings that are **not** causal-CI defects:
+
+1. Nested `actions/setup-python@v5` inside `pypa/cibuildwheel@v2.22.0` (intentionally not major-bumped).
+2. `upload-artifact` warned that `crates/hiveclaw-python/wheelhouse/*.whl` matched no files (pre-existing path; default `if-no-files-found: warn`). Unrelated to causal tests.
 
 ## Workflow security posture
 
