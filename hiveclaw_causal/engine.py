@@ -14,6 +14,7 @@ from .types import (
     ObjectStatus,
     Record,
 )
+from .work import WorkCounter
 
 
 def next_status(kind: ObjectKind, rule: InvalidationRule) -> str:
@@ -31,9 +32,15 @@ def next_status(kind: ObjectKind, rule: InvalidationRule) -> str:
 
 
 class InvalidationEngine:
-    def __init__(self, store: Store, clock: Callable[[], str]) -> None:
+    def __init__(
+        self,
+        store: Store,
+        clock: Callable[[], str],
+        counter: WorkCounter | None = None,
+    ) -> None:
         self.store = store
         self.clock = clock
+        self.counter = counter if counter is not None else WorkCounter()
 
     def fire(
         self,
@@ -73,6 +80,7 @@ class InvalidationEngine:
         obs_start = str(new_obs.payload.get("window_start", ""))
         obs_end = str(new_obs.payload.get("window_end", ""))
         for claim in self.store.objects_of(ObjectKind.CLAIM):
+            self.counter.inspect(claim.id)
             if claim.status not in (
                 ObjectStatus.PROPOSED.value,
                 ObjectStatus.ACTIVE.value,
@@ -108,6 +116,7 @@ class InvalidationEngine:
     ) -> None:
         if object_id in stack:
             return
+        self.counter.inspect(object_id)
         rec = self.store.get_or_none(object_id)
         if rec is None:
             return
@@ -123,6 +132,7 @@ class InvalidationEngine:
             edge_id=edge_id,
             rule=rule.value,
         )
+        self.counter.touch(object_id)
         for dep_id, dep_edge, dep_rule in self.store.reverse_lookup(object_id):
             self._propagate(
                 dep_id,

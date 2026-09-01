@@ -30,6 +30,7 @@ from .types import (
     TrustClass,
 )
 from .util import content_hash
+from .work import WorkCounter
 
 CACHE_GAP = "still missing: provider-status cross-check"
 
@@ -79,7 +80,8 @@ class RewindRuntime:
         self.fixture: RewindFixture | None = None
         self._clock_s = 0
         self._revalidation = RevalidationReport(scheduled_task_ids=(), skipped=())
-        self.engine = InvalidationEngine(store, clock=self._now)
+        self.work = WorkCounter()
+        self.engine = InvalidationEngine(store, clock=self._now, counter=self.work)
 
     @classmethod
     def create(cls, db_path: Path | str) -> RewindRuntime:
@@ -156,7 +158,10 @@ class RewindRuntime:
         trust: TrustClass,
         source_uri: str,
         timestamp: str | None = None,
+        repair: str = "targeted",
     ) -> str:
+        if repair not in ("targeted", "naive", "none"):
+            raise ValueError(f"repair must be targeted|naive|none, got {repair!r}")
         ts = timestamp or self._now()
         aid = _KIND_TO_ID[kind]
         rec = Record(
@@ -173,11 +178,16 @@ class RewindRuntime:
         self.store.put_object(
             rec, ts=ts, event_type="ingest", reason=f"ingest {kind.value} via {producer}"
         )
+        self.work.touch(aid)
         new_obs = self._extract(rec)
         if new_obs is not None:
-            self.engine.apply_provider_overlap_rule(new_obs)
             if new_obs.payload.get("kind") == "provider_outage":
-                self._after_provider(new_obs)
+                if repair == "targeted":
+                    self._repair_targeted(new_obs)
+                elif repair == "naive":
+                    self._repair_naive(new_obs)
+            else:
+                self.engine.apply_provider_overlap_rule(new_obs)
         return aid
 
     def objects_of(self, kind: ObjectKind) -> list[Record]:
@@ -193,6 +203,7 @@ class RewindRuntime:
         return self.store.all_events()
 
     def policy_authorize(self, action_id: str) -> PolicyDecision:
+        self.work.inspect(action_id)
         return authorize(self.store, action_id)
 
     def last_revalidation(self) -> RevalidationReport:
@@ -282,6 +293,7 @@ class RewindRuntime:
         self.store.put_object(
             rec, ts=ts, event_type="extract", reason=f"extract {oid} from {artifact_id}"
         )
+        self.work.touch(oid)
         self.store.add_edge(
             Edge(
                 id=f"edge-produced-{artifact_id}-{oid}",
@@ -434,7 +446,63 @@ class RewindRuntime:
         self.store.put_object(
             rec, ts=ts, event_type="schedule_task", reason=f"schedule {tid}"
         )
+        self.work.touch(tid)
         return rec
+
+    def _repair_targeted(self, obs: Record) -> None:
+        self.engine.apply_provider_overlap_rule(obs)
+        self._after_provider(obs)
+
+    def _repair_naive(self, obs: Record) -> None:
+        """Re-evaluate every object in the store, then apply the same conclusion steps.
+
+        Does not use reverse-dependency traversal to skip subtrees. Same semantic
+        rules still fire (overlap → challenge cache claim → block rollback).
+        """
+        snapshot = list(self.store.all_objects())
+        for rec in snapshot:
+            self.work.inspect(rec.id)
+            if rec.kind == ObjectKind.CLAIM:
+                self.work.touch(rec.id)
+            elif rec.kind == ObjectKind.ACTION:
+                self.work.inspect(rec.id)
+                authorize(self.store, rec.id)
+                self.work.touch(rec.id)
+            elif rec.kind == ObjectKind.TASK:
+                self.work.touch(rec.id)
+            elif rec.kind == ObjectKind.OBSERVATION:
+                self.work.touch(rec.id)
+            elif rec.kind == ObjectKind.ARTIFACT:
+                self.work.touch(rec.id)
+            elif rec.kind == ObjectKind.VERIFICATION:
+                self.work.touch(rec.id)
+        self.engine.apply_provider_overlap_rule(obs)
+        self._put_task(
+            TASK_VERIFY,
+            ts=self._now(),
+            payload={
+                "kind": "verify_outage_pct",
+                "target_id": obs.id,
+            },
+        )
+        self._verify_outage(obs)
+        follow = self._put_task(
+            TASK_FOLLOWUP,
+            ts=self._now(),
+            payload={
+                "kind": "followup_investigation",
+                "target_id": CLAIM_RESIDUAL,
+                "note": "bounded look at residual timeouts outside the outage window",
+            },
+        )
+        scheduled = tuple(
+            t.id for t in self.store.objects_of(ObjectKind.TASK)
+        )
+        self._revalidation = RevalidationReport(
+            scheduled_task_ids=scheduled,
+            skipped=(),
+        )
+        _ = follow
 
     def _after_provider(self, obs: Record) -> None:
         assert self.fixture is not None
@@ -456,6 +524,7 @@ class RewindRuntime:
         scheduled.append(TASK_VERIFY)
 
         for task in self.store.objects_of(ObjectKind.TASK):
+            self.work.inspect(task.id)
             if task.id in scheduled:
                 continue
             target = str(task.payload.get("target_id") or "")
@@ -523,6 +592,8 @@ class RewindRuntime:
         self.store.put_object(
             ver, ts=ts, event_type="verify", reason="deterministic outage_explains_pct"
         )
+        self.work.touch(ver.id)
+        self.work.inspect(ver.id)
         claim = Record(
             id=CLAIM_OUTAGE,
             kind=ObjectKind.CLAIM,
@@ -557,6 +628,7 @@ class RewindRuntime:
             event_type="propose_claim",
             reason="verifier: outage window covers computed share of failures",
         )
+        self.work.touch(claim.id)
         residual_n = sum(
             1
             for f in self.fixture.failures
@@ -600,6 +672,7 @@ class RewindRuntime:
             event_type="propose_claim",
             reason="investigator: residual failures sit outside the outage window",
         )
+        self.work.touch(residual.id)
 
 
 def run_rewind(db_path: Path | str, seed: int = 42) -> RewindRuntime:
