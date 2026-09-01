@@ -22,12 +22,18 @@ def measure_repair(
     *,
     mode: str,
     seed: int = 42,
+    extra_unrelated: int = 0,
+    extra_related_claims: int = 0,
 ) -> tuple[RewindRuntime, WorkMetrics]:
     if mode not in ("targeted", "naive"):
         raise ValueError(mode)
     path = Path(db_path)
     rt = RewindRuntime.create(path)
-    fixture = build_rewind_fixture(seed=seed)
+    fixture = build_rewind_fixture(
+        seed=seed,
+        extra_unrelated=extra_unrelated,
+        extra_related_claims=extra_related_claims,
+    )
     rt.ingest_and_propose(fixture)
     before = {r.id: (r.status, r.updated_at) for r in rt.store.all_objects()}
     rt.work.reset()
@@ -92,6 +98,8 @@ def format_table(targeted: WorkMetrics, naive: WorkMetrics) -> str:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--extra-unrelated", type=int, default=0)
+    p.add_argument("--extra-related", type=int, default=0)
     p.add_argument("--json", action="store_true")
     p.add_argument("--dir", type=Path, default=None)
     args = p.parse_args(argv)
@@ -101,8 +109,15 @@ def main(argv: list[str] | None = None) -> int:
         td = tempfile.TemporaryDirectory()
         base = Path(td.name)
     try:
-        t_rt, t_m = measure_repair(base / "targeted.sqlite", mode="targeted", seed=args.seed)
-        n_rt, n_m = measure_repair(base / "naive.sqlite", mode="naive", seed=args.seed)
+        kwargs = {
+            "seed": args.seed,
+            "extra_unrelated": args.extra_unrelated,
+            "extra_related_claims": args.extra_related,
+        }
+        t_rt, t_m = measure_repair(
+            base / "targeted.sqlite", mode="targeted", **kwargs
+        )
+        n_rt, n_m = measure_repair(base / "naive.sqlite", mode="naive", **kwargs)
         _ = (t_rt, n_rt)
         print(format_table(t_m, n_m))
         print()

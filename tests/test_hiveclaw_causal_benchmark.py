@@ -42,6 +42,19 @@ class TestTargetedVsNaive(unittest.TestCase):
         self.assertGreater(targeted.objects_untouched, 0)
         self.assertGreaterEqual(naive.objects_touched, naive.objects_before)
 
+    def test_scale_100_untouched_majority(self) -> None:
+        _rt, targeted = measure_repair(
+            self.dir / "s100.sqlite",
+            mode="targeted",
+            extra_unrelated=29,
+            extra_related_claims=1,
+        )
+        self.assertEqual(targeted.objects_before, 100)
+        self.assertGreaterEqual(targeted.objects_untouched, 90)
+        self.assertLessEqual(targeted.objects_touched, 15)
+        self.assertTrue(targeted.rollback_blocked)
+        self.assertAlmostEqual(targeted.support_pct, 92.0, places=1)
+
 
 if __name__ == "__main__":
     unittest.main()

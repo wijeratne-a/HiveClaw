@@ -148,6 +148,7 @@ class RewindRuntime:
             timestamp=str(fixture.unrelated_note["timestamp"]),
         )
         self._investigate()
+        self._ingest_scale_extras(fixture)
 
     def ingest_artifact(
         self,
@@ -422,6 +423,111 @@ class RewindRuntime:
                 "note": "unrelated README lint",
             },
         )
+
+    def _ingest_scale_extras(self, fixture: RewindFixture) -> None:
+        """Unrelated triples (not in the cache cone) plus optional claims on CLAIM_CACHE."""
+        for i in range(fixture.extra_unrelated):
+            ts = self._now()
+            aid = f"art-unrel-{i:04d}"
+            oid = f"obs-unrel-{i:04d}"
+            tid = f"task-unrel-{i:04d}"
+            body = {"summary": f"unrelated note {i}", "i": i}
+            art = Record(
+                id=aid,
+                kind=ObjectKind.ARTIFACT,
+                status=ObjectStatus.ACTIVE.value,
+                provenance=_prov(
+                    "ingestor",
+                    f"fixture://health/unrel/{i}",
+                    body,
+                    ts,
+                    TrustClass.TRUSTED,
+                ),
+                payload={"kind": ArtifactKind.HEALTH_NOTE.value, "body": body},
+                evidence_ids=(),
+                source_snapshot=content_hash(body),
+                created_at=ts,
+                updated_at=ts,
+            )
+            self.store.put_object(
+                art, ts=ts, event_type="ingest", reason=f"scale extra artifact {i}"
+            )
+            obs = Record(
+                id=oid,
+                kind=ObjectKind.OBSERVATION,
+                status=ObjectStatus.ACTIVE.value,
+                provenance=_prov(
+                    "extractor",
+                    f"fixture://health/unrel/{i}",
+                    body,
+                    ts,
+                    TrustClass.DETERMINISTIC,
+                ),
+                payload={"kind": "unrelated_health", "summary": body["summary"]},
+                evidence_ids=(aid,),
+                source_snapshot=content_hash(body),
+                created_at=ts,
+                updated_at=ts,
+            )
+            self.store.put_object(
+                obs, ts=ts, event_type="extract", reason=f"scale extra observation {i}"
+            )
+            self.store.add_edge(
+                Edge(
+                    id=f"edge-produced-{aid}-{oid}",
+                    src=aid,
+                    dst=oid,
+                    mode=EdgeMode.PRODUCED_FROM,
+                    rule=InvalidationRule.HARD_STALE,
+                    declared_effect="observation stale if artifact superseded",
+                )
+            )
+            self._put_task(
+                tid,
+                ts=ts,
+                payload={
+                    "kind": "docs_typo",
+                    "target_id": oid,
+                    "note": f"unrelated lint {i}",
+                },
+            )
+        for i in range(fixture.extra_related_claims):
+            ts = self._now()
+            cid = f"claim-related-{i:04d}"
+            snapshot = content_hash({"parent": CLAIM_CACHE, "i": i})
+            rec = Record(
+                id=cid,
+                kind=ObjectKind.CLAIM,
+                status=ObjectStatus.ACTIVE.value,
+                provenance=_prov(
+                    "investigator",
+                    f"fixture://claim/related/{i}",
+                    {"i": i},
+                    ts,
+                    TrustClass.INFERRED,
+                ),
+                payload={
+                    "hypothesis": f"follow-on interpretation {i} of the primary cause claim",
+                    "confidence": 0.4,
+                },
+                evidence_ids=(CLAIM_CACHE,),
+                source_snapshot=snapshot,
+                created_at=ts,
+                updated_at=ts,
+            )
+            self.store.put_object(
+                rec, ts=ts, event_type="propose_claim", reason=f"scale related claim {i}"
+            )
+            self.store.add_edge(
+                Edge(
+                    id=f"edge-depends-{cid}-{CLAIM_CACHE}",
+                    src=cid,
+                    dst=CLAIM_CACHE,
+                    mode=EdgeMode.DEPENDS_ON,
+                    rule=InvalidationRule.HARD_CHALLENGE,
+                    declared_effect="challenge follow-on if cache claim is challenged",
+                )
+            )
 
     def _put_task(self, tid: str, *, ts: str, payload: dict[str, Any]) -> Record:
         rec = Record(

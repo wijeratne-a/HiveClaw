@@ -33,6 +33,8 @@ class RewindFixture:
     goal: str
     provider_report: dict[str, Any]
     unrelated_note: dict[str, Any]
+    extra_unrelated: int = 0
+    extra_related_claims: int = 0
 
 
 def parse_ts(s: str) -> datetime:
@@ -73,7 +75,14 @@ def _spread(
     return tuple(out)
 
 
-def build_rewind_fixture(seed: int = 42) -> RewindFixture:
+def build_rewind_fixture(
+    seed: int = 42,
+    *,
+    extra_unrelated: int = 0,
+    extra_related_claims: int = 0,
+) -> RewindFixture:
+    if extra_unrelated < 0 or extra_related_claims < 0:
+        raise ValueError("scale extras must be >= 0")
     rng = random.Random(seed)
     incident = TimeWindow(start="2026-08-30T14:00:00Z", end="2026-08-30T14:30:00Z")
     outage = TimeWindow(start="2026-08-30T14:02:00Z", end="2026-08-30T14:28:00Z")
@@ -144,4 +153,6 @@ def build_rewind_fixture(seed: int = 42) -> RewindFixture:
             "summary": "unrelated nightly health check passed",
             "timestamp": "2026-08-30T12:00:00Z",
         },
+        extra_unrelated=extra_unrelated,
+        extra_related_claims=extra_related_claims,
     )
