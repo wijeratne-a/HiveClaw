@@ -13,18 +13,33 @@ on:
       - "crates/hiveclaw-backend-metal/**"
       - ".github/workflows/wheel-macos-arm64.yml"
 
+permissions:
+  contents: read
+
 jobs:
   wheel:
     runs-on: macos-14
     timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        # actions/checkout@v7.0.1 — runs.using: node24
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        # dtolnay/rust-toolchain@master (2026-08-05); toolchain remains stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        # actions/setup-python@v7.0.0 — runs.using: node24
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.11"
 
@@ -38,14 +53,17 @@ jobs:
           chmod +x crates/hiveclaw-python/python/hiveclaw_python/native/macos_arm64/pheromoned
 
       - name: Build wheel (cibuildwheel + maturin)
-        uses: pypa/cibuildwheel@v2.22.0
+        # pypa/cibuildwheel@v2.22.0 — version kept; tag pinned to commit SHA
+        uses: pypa/cibuildwheel@ee63bf16da6cddfb925f542f2c7b59ad50e93969
         with:
           package-dir: crates/hiveclaw-python
         env:
           CIBW_BUILD: cp311-*
           CIBW_ARCHS_MACOS: arm64
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload wheel
+        # actions/upload-artifact@v7.0.1 — runs.using: node24
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: hiveclaw-python-wheel-macos-arm64
           path: crates/hiveclaw-python/wheelhouse/*.whl
