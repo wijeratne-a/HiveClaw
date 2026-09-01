@@ -182,7 +182,9 @@ class Store:
             ),
         )
         self._conn.commit()
-        seq = int(cur.lastrowid)
+        seq = cur.lastrowid
+        if seq is None:
+            raise RuntimeError("INSERT INTO events did not produce lastrowid")
         return CausalEvent(
             seq=seq,
             ts=ts,
