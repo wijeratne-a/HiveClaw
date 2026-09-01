@@ -106,6 +106,16 @@ class Store:
               rule TEXT,
               payload TEXT NOT NULL
             );
+            CREATE TRIGGER IF NOT EXISTS events_append_only_no_update
+            BEFORE UPDATE ON events
+            BEGIN
+              SELECT RAISE(ABORT, 'events is append-only: UPDATE is forbidden');
+            END;
+            CREATE TRIGGER IF NOT EXISTS events_append_only_no_delete
+            BEFORE DELETE ON events
+            BEGIN
+              SELECT RAISE(ABORT, 'events is append-only: DELETE is forbidden');
+            END;
             CREATE TABLE IF NOT EXISTS objects (
               id TEXT PRIMARY KEY,
               kind TEXT NOT NULL,
