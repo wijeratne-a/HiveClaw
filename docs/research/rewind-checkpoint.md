@@ -2,12 +2,100 @@
 
 Distinguish **proven** (command ran) vs **implemented but not separately measured**.
 
-**HEAD at start of Session 4:** `368b330` on `origin/main`.  
-**This file:** Session 4 (2026-08-31) update. Not a new file.
+---
+
+## State of evidence (Session 5, 2026-09-01)
+
+HEAD when this section was written: local `main` after Session 5 measurements (pre-commit). Interpreter: `.venv/bin/python` 3.11.1. Causal suite: `make test-causal` → **29 tests OK**, mypy 22 files.
+
+This is not a closeness-to-revolution score. It is what the tests and experiment logs actually show.
+
+### Original four guarantees
+
+| Guarantee | What it is | Status | Evidence |
+|-----------|------------|--------|----------|
+| **A — typed provenance** | Producer, source URI, version/hash, timestamp, trust class on records | **Evidenced** | `tests/test_hiveclaw_causal_rewind.py` (`_assert_guarantee_a` on claims, observations, actions, provider artifact). Types: `SourceRef` / `Provenance`. |
+| **B — claims carry invalidation conditions** | Evidence ids, source snapshot, declared invalidation conditions | **Evidenced** | Same e2e (`_assert_guarantee_b_claim` on cache, outage, residual claims). |
+| **C — causal edges + append-only history** | Typed edges with rules; status changes append events; events cannot be UPDATE/DELETE | **Evidenced** | Engine 5/5 (`tests/test_hiveclaw_causal_engine.py`: propagation, idempotency, cycle, isolation). Store 3/3: raw `UPDATE`/`DELETE` on `events` abort (`19a112b`). Reverse index used for invalidation *and*, as of Session 5, for task-cone lookup without a full task scan. |
+| **D — deterministic policy gate** | In-process authorize/deny; LLM must not produce the decision | **Evidenced** | Policy 3/3 + e2e: rollback `allowed=False` twice with the same reason; `edge` + `rule=block_action` on the blocked action. Demo: `python -m hiveclaw_causal.demo_rewind`. |
+
+### Section 4 / efficiency and coordination sub-hypotheses
+
+These are the Rewind e2e “only affected work” step plus the Session 3–4 stigmergy-on-a-number claims.
+
+| Claim | Status | Exact numbers / links |
+|-------|--------|------------------------|
+| Targeted repair reaches the **same conclusion** as naive full re-eval | **Evidenced** | 92.0% `outage_explains_pct` (seed 42), rollback blocked, follow-up present at N=12, 100, 500, 2000. exp-001, exp-002. |
+| Targeted **touches fewer objects** | **Evidenced** | N=12: 9 vs 19. N=500: 11 vs 507. N=2000: 11 vs 2007. Touched stays ~11 while naive = full graph. |
+| Targeted uses **fewer eval_steps** | **Evidenced, and the scaling story changed** | Session 4: targeted eval_steps **grew with task count** (7 → 38 → 173 at N=12/100/500) because every task was inspected to skip it. Session 5: tasks are `depends_on` their target in `reverse_deps`; repair uses `dependent_tasks` on the cone. Targeted eval_steps **6 → 8 → 10 → 10** at N=12/100/500/2000. Naive 19 / 109 / 511 / 2011. |
+| Eval-step **gap grows faster than linearly** | **Not supported** | Difference naive − targeted ≈ N (13, 101, 501, 2001): **linear**, which is what O(N) vs O(cone) predicts. Ratio grows with N (~3× → ~201×). Superlinear eval-step savings were not observed. |
+| **Wall-clock** targeted is faster | **Evidenced only at sufficient N, small absolute gap** | N=12: overlap / naive sometimes faster (~3 ms). N=500: targeted ~2.6–3.1 ms vs naive ~11.9 ms (~9 ms). N=2000: targeted ~3.0–3.2 ms vs naive ~41–46 ms (~38–43 ms). Still tens of milliseconds on this machine. exp-002. |
+| Inspecting unrelated tasks is **required** by the index | **Falsified** | Existing `reverse_deps` was sufficient once task→target edges were written. Engine skips `TASK` on status propagation so those edges do not stale the queue. Not an open TODO; not a new index. |
+| `apply_provider_overlap_rule` is O(cone) | **Assumed false / untested at claim scale** | It still inspects **every claim**. This fixture scales unrelated **tasks**, not claims (`R=1–2`). If claims grew like tasks, that scan would return. |
+| Multi-process leases, no worker messaging | **Evidenced, single host** | exp-003: 2 workers drain Rewind pending; 5 workers × 3 tasks × 8 trials, **0 double-lease, 0 dropped**. WAL + `BEGIN IMMEDIATE` + CAS on `pending`. |
+| Dead worker’s lease is **reclaimed** | **Evidenced, TTL not crash-detection** | exp-004: SIGKILL after lease; after 0.25 s TTL, survivor completes; `reclaimed_from=crasher`; `lease_reclaim` event. A slow live worker could be preempted (not tested). |
+| Drain under **continuous insert** | **Evidenced, small N** | exp-004: 24 tasks inserted while 3 workers drain; 24 unique leases, all `done`. |
+| Multi-host / IOSurface stigmergy is the same primitive | **Untested** | SQLite file on one machine. Slab `claim_task` is still slot ownership, not this queue. No second-host run. |
+| LLM-free outage % | **Evidenced** | `stats.outage_explains_pct`; seed 42 → **92.0** (92/100 timestamps). Stored as float. |
+
+### Smaller in practice than the original efficiency story
+
+**Eval-step scaling (named):** Until Session 5, targeted repair’s eval_steps tracked **total task count**, not the invalidated cone, because skip eligibility scanned `objects_of(TASK)`. That capped how large the efficiency advantage could look. After indexing tasks in `reverse_deps`, that particular cap is gone on this fixture: targeted eval_steps stay ~10 from N=500 to N=2000 while naive tracks N.
+
+What remains small: **wall-clock** (milliseconds, not a capacity-planning result); **claim overlap** still a full claim scan; **lease proof** still one SQLite file.
+
+### Assumed but untested
+
+- Pre-Session-2 SQLite files gaining append-only triggers on next open.
+- Lease TTL vs a live worker slower than TTL.
+- Overlap-rule cost when claim count ≈ task count.
+- Multi-writer correctness beyond these process tests (not a model checker).
+- Ironclad burn-in, `integration_test.py --stress`, Phase 7 goldens (out of Rewind scope).
+- Any coupling of this causal graph to the Metal/IOSurface slab.
+
+### Largest remaining risk to the core thesis
+
+The thesis under test is that a typed reverse-indexed trace lets agents **coordinate and repair locally** instead of reprocessing the world, and that this is a real coordination primitive (not a single-process demo).
+
+The largest remaining risk is **scope of the coordination evidence**, not the invalidation math: every lease and efficiency number is **one machine, one SQLite file**. Crash reclaim is a **timer**, not failure detection. The product’s other “stigmergy” (IOSurface slots) is still a different object. If the claim is “this replaces a manager / bus / slab for agents,” that is **not evidenced**. If the claim is “Rewind’s graph skips unrelated work and blocks a rollback for documented reasons, and a local CAS queue can drain without double-lease in these tests,” that **is** evidenced, including a now-flat eval-step curve vs N for extra unrelated tasks.
+
+---
+
+## Session 5 — 2026-09-01 (efficiency curve + harder leases)
+
+### Part 1 — cone-indexed tasks, exp-002 re-run
+
+Implemented: `depends_on` edges from tasks to `target_id`; `_after_provider` uses `Store.dependent_tasks`; engine does not status-propagate into `TASK`.
+
+| N before | eval t/n | wall_s run1 t/n | wall_s run2 t/n |
+|----------|----------|-----------------|-----------------|
+| 12 | 6 / 19 | 0.003131 / 0.003376 | 0.003643 / 0.002916 |
+| 100 | 8 / 109 | 0.002610 / 0.004298 | 0.002392 / 0.004426 |
+| 500 | 10 / 511 | 0.003107 / 0.011973 | 0.002590 / 0.011888 |
+| 2000 | 10 / 2011 | 0.003178 / 0.041284 | 0.003048 / 0.045704 |
+
+Touched 9–11 vs naive full graph. Details: `docs/research/experiments/exp-002-scale-targeted-vs-naive.md`.
+
+### Part 2 — crash reclaim + insert churn
+
+`test_killed_worker_lease_is_reclaimed` and `test_continuous_insert_while_workers_drain` added. Full lease file 4/4. `docs/research/experiments/exp-004-lease-expiry-and-churn.md`.
+
+### Part 3 — this file
+
+Consolidated section above. No “revolutionary” framing.
+
+### Local suite after Session 5
+
+`make test-causal` → **29 tests OK**, mypy 22 files.
+
+### Next highest-value step
+
+If the thesis needs a coordination claim beyond one host: a second process isolation story that is not the same SQLite file (or an honest product decision that H5 is local-only). If the thesis needs efficiency: scale **claims** in the overlap rule, or stop. Do not wire the slab without a named consumer.
 
 ---
 
 ## Session 4 — 2026-08-31 (CI confirm + scale + concurrent leases)
+
 
 ### Part 1 — GitHub Actions (watched, not assumed)
 

@@ -296,6 +296,13 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 
 ## Session log
 
+### 2026-09-01 — Session 5 efficiency curve + lease crash/churn
+
+- Tasks indexed in `reverse_deps` (`depends_on` target). Repair no longer scans all tasks. Engine skips TASK on status fan-out.
+- exp-002 re-run: targeted eval_steps 6/8/10/10 at N=12/100/500/2000 vs naive 19/109/511/2011. Wall ~3 ms vs ~12 ms (N=500) vs ~41–46 ms (N=2000). Gap is linear in N, not superlinear.
+- exp-004: SIGKILL mid-lease reclaimed after TTL; 24 inserts while 3 workers drain, 0 doubles.
+- `make test-causal` 29 OK. Demo WIP left unstaged.
+
 ### 2026-08-31 — Session 4 CI confirm, scale, leases
 
 - CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33478599893 success (~12s job, `368b330`).
@@ -364,3 +371,4 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 - Targeted vs naive: `docs/research/experiments/exp-001-targeted-vs-full-rerun.md`
 - Scaled benchmark: `docs/research/experiments/exp-002-scale-targeted-vs-naive.md`
 - Concurrent leases: `docs/research/experiments/exp-003-concurrent-leases.md`
+- Lease crash/churn: `docs/research/experiments/exp-004-lease-expiry-and-churn.md`
