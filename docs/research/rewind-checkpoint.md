@@ -4,11 +4,13 @@ Distinguish **proven** (command ran) vs **implemented but not separately measure
 
 ---
 
-## State of evidence (Session 10, 2026-09-01)
+## State of evidence (Session 11, 2026-09-01)
 
-HEAD described here: `251147c930e66c1e2a8250448bede87dc7d01d59` (Session 10 reconciliation docs; Session 9 code is parent `ff4b146e65f10407d3b3552ce3a9a2328faf1afa`). Causal runtime on that SHA: https://github.com/wijeratne-a/HiveClaw/actions/runs/33596401366 (`test-causal` success). Session 9 code CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33596227872. Interpreter: `.venv/bin/python` 3.11.1. Confirm the tip with `git ls-remote origin refs/heads/main` — a later docs-only CI-record commit may sit on top of `251147c` without changing causal code.
+**Milestone status: complete and stable.** Rewind as a CPU-only, single-authoritative-store causal runtime (bounded-cost invalidation on this fixture, append-only events, TTL/heartbeat leases, operator CLI) is closed as of this session. Further work is a new initiative, not another numbered continuation of this loop. Confirm the tip with `git ls-remote origin refs/heads/main`.
 
-Session 10 is documentation reconciliation after `docs/research/independent-audit-2026-09-01.md`. It does not change causal math. Historical session SHAs/run IDs below are left as they were for those sessions (verified 2026-09-01: they still resolve).
+HEAD described here: Session 11 docs on `origin/main` after this file’s commit. Demo WIP (slab/LLM, not causal): `18717d95e99899be149ae59cc7aca3538ee315f5`. Session 10 tip `9feb2245a0adf0da3094377d0f211dd5e2849685` — CI https://github.com/wijeratne-a/HiveClaw/actions/runs/33596531928. Session 9 causal code `ff4b146e65f10407d3b3552ce3a9a2328faf1afa` — CI https://github.com/wijeratne-a/HiveClaw/actions/runs/33596227872. Interpreter: `.venv/bin/python` 3.11.1.
+
+Session 11 does not change causal math. Historical session SHAs/run IDs below are left as they were (verified 2026-09-01: they still resolve).
 
 **Evidenced claim (precise):** Rewind is a **centralized causal store** (one SQLite file or one Postgres server) with **safe concurrent multi-process and networked clients**: bounded-cost invalidation on this fixture, append-only events, TTL/heartbeat leases, and a hard TTL ceiling so a client cannot strand work with an infinite/hour-long lease. It is **not** “no central manager” and **not** decentralized stigmergy.
 
@@ -76,6 +78,35 @@ The original product brief asked for a visual Rewind demo a non-technical review
 **Decision (Session 10):** descoped for now. A GUI sprint is not the next causal-runtime milestone. Proof remains CLI + tests. Revisit only if a named reviewer cannot use the CLI.
 
 Discovery docs: `docs/research/architecture-map.md` and `docs/research/gap-analysis.md` (Session 10; the original pre-code pair was never written).
+
+---
+
+## Session 11 — 2026-09-01 (close the loop)
+
+### Part 1 — Stale `demos/*` / `HEALTH_REPORT*.md` WIP
+
+**What it was:** Not Rewind. Slab/LLM showcase (Repo Pulse + Consensus Showdown: `hiveclaw-server`, pheromoned, MLX). Already partly on `main` (`d577ed0`); a later refactor sat unstaged for ten causal sessions because those sessions excluded it.
+
+**Classification:** Finished-enough local increment, not abandoned scratch and not an active Rewind thread.
+
+**Action:** Committed as `18717d9` (`demos: extract shared LLM helpers and add consensus showdown TUI`). `HEALTH_REPORT.md` / `HEALTH_REPORT_BASELINE.md` are regeneratable LLM output (not a trusted analyzer — see `CONTEXT.md`); gitignored with `.DS_Store`. Verified this session: `py_compile` of `demos/*.py`, helper checks on `json_utils` / `health_report_validate`, `--help` on the four entry points. Full TUI against a live server was not re-run (needs daemon + model).
+
+### Part 2 — Go / no-go on this milestone
+
+**Yes. This milestone is complete and stable as of Session 11.**
+
+What that means: a proven, CPU-only, single-authoritative-store causal runtime with bounded-cost invalidation on the documented fixture, safe concurrent leasing, Session 9 operator tooling, CI, and paperwork that matches `origin/main`.
+
+This is **not** an open-ended “Session 12” of the same contract. Any further work is a **new, separately scoped initiative** (examples: a Rewind GUI product; a different consistency model for multi-master stores). Do not treat those as unfinished homework on this runtime.
+
+One direction, restated so it is not mistaken for a next ticket:
+
+| Already decided | Where | Status |
+|-----------------|-------|--------|
+| Decentralization / “no central manager” | Session 8, `docs/research/decentralization-assessment.md` | **Out of scope** for this data model. Still the gap versus the original thesis; not an open Rewind experiment. |
+| Rewind GUI (five-minute visual demo) | Session 10, section above | **Descoped.** Proof is CLI + tests. |
+
+No new Section 4 sub-hypothesis is opened here.
 
 ---
 

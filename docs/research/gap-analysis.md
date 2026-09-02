@@ -14,6 +14,8 @@
 
 The original “two discovery docs must precede code” rule is **retired as a gate**. The living sources of truth for the causal store are the ADR (`docs/adr/CAUSAL_RUNTIME_H5.md`), `docs/research/rewind-checkpoint.md`, experiment logs, and tests. Do not block future work on recreating a pre-Session-1 discovery packet.
 
+**Session 11:** the Rewind milestone is **complete and stable**. GUI and decentralization remain out of scope for this runtime; they are not open Rewind tickets. Slab/LLM `demos/` WIP was committed separately (`18717d9`); generated `HEALTH_REPORT*.md` is gitignored.
+
 ## What exists (verified)
 
 Typed provenance, invalidation conditions, append-only events, reverse-dep + topic indexes, deterministic policy gate, SQLite and Postgres as one architecture, TTL/heartbeat leases with a hard ceiling, CLI demo/inspect/benchmark, Session 9 verify/status/backup/migrate. Evidence: checkpoint + `make test-causal`.

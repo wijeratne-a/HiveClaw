@@ -275,13 +275,9 @@ bash .github/scripts/ci_ironclad_verify.sh     # heavy; self-hosted Mac
 
 ---
 
-## Working tree (as of 2026-08-31)
+## Working tree (as of Session 11, 2026-09-01)
 
-Rewind + Session 2 harden commits are on `main`. **Uncommitted / untracked** (do not discard blindly; not part of causal-runtime):
-
-- Modified: `demos/README.md`, `demos/audit_swarm.py`, `demos/baseline_audit.py`, `demos/run_repo_pulse.py`
-- Untracked: `demos/consensus_showdown.py`, `demos/health_report_validate.py`, `demos/json_utils.py`, `demos/llm_ab.py`, `demos/llm_client.py`
-- Generated: `HEALTH_REPORT.md`, `HEALTH_REPORT_BASELINE.md`, `.DS_Store`
+Causal runtime and Session 11 close-the-loop docs are on `main`. Slab/LLM demo increment committed as `18717d9`. Generated `HEALTH_REPORT.md` / `HEALTH_REPORT_BASELINE.md` and `.DS_Store` are gitignored (not source).
 
 Other branch (not checked out): `feat/llm-swarm-integration`.
 
@@ -297,6 +293,11 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 ---
 
 ## Session log
+
+### 2026-09-01 — Session 11 close the loop
+
+- Demo WIP classified as parked slab/LLM showcase, not Rewind. Committed `18717d9`; `HEALTH_REPORT*.md` and `.DS_Store` gitignored.
+- Rewind milestone declared **complete and stable**. No Session 12 of this contract. GUI (Session 10) and decentralization (Session 8) stay out of scope, not next tickets.
 
 ### 2026-09-01 — Session 10 reconcile independent audit
 
