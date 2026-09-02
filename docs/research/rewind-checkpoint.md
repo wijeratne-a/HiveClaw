@@ -6,7 +6,7 @@ Distinguish **proven** (command ran) vs **implemented but not separately measure
 
 ## State of evidence (Session 8, 2026-09-01)
 
-HEAD will be this session’s commits on `origin/main`. Interpreter: `.venv/bin/python` 3.11.1.
+HEAD: `f4496ee` on `origin/main`. CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33582036614 (`test-causal` success). Interpreter: `.venv/bin/python` 3.11.1.
 
 **Evidenced claim (precise):** Rewind is a **centralized causal store** (one SQLite file or one Postgres server) with **safe concurrent multi-process and networked clients**: bounded-cost invalidation on this fixture, append-only events, TTL/heartbeat leases, and a hard TTL ceiling so a client cannot strand work with an infinite/hour-long lease. It is **not** “no central manager” and **not** decentralized stigmergy.
 
