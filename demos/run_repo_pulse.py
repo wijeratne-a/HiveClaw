@@ -78,12 +78,14 @@ def run_demo(base_url: str, model: str, max_files: int, slot: int) -> int:
     lock = threading.Lock()
     done_baseline = threading.Event()
     done_hive = threading.Event()
+    wall_start: dict[str, float] = {}
 
     report_base = _repo_root() / "HEALTH_REPORT_BASELINE.md"
     report_hive = _repo_root() / "HEALTH_REPORT.md"
 
     def baseline_worker() -> None:
-        t0 = time.perf_counter()
+        wall_start["baseline"] = time.perf_counter()
+        t0 = wall_start["baseline"]
         with lock:
             baseline_state["status"] = "running"
         met = run_baseline(
@@ -97,7 +99,8 @@ def run_demo(base_url: str, model: str, max_files: int, slot: int) -> int:
         done_baseline.set()
 
     def hive_worker() -> None:
-        t0 = time.perf_counter()
+        wall_start["hive"] = time.perf_counter()
+        t0 = wall_start["hive"]
         with lock:
             hive_state["status"] = "running"
         met = run_audit_swarm(
@@ -116,8 +119,17 @@ def run_demo(base_url: str, model: str, max_files: int, slot: int) -> int:
     tb.start()
     th.start()
 
+    def _tick_elapsed() -> None:
+        now = time.perf_counter()
+        with lock:
+            if baseline_state.get("status") == "running" and "baseline" in wall_start:
+                baseline_state["elapsed_s"] = now - wall_start["baseline"]
+            if hive_state.get("status") == "running" and "hive" in wall_start:
+                hive_state["elapsed_s"] = now - wall_start["hive"]
+
     with Live(refresh_per_second=4) as live:
         while not (done_baseline.is_set() and done_hive.is_set()):
+            _tick_elapsed()
             with lock:
                 left = _state_panel("Baseline (JSON transcript)", baseline_state)
                 right = _state_panel("HiveClaw (slab coordination)", hive_state)
@@ -134,6 +146,30 @@ def run_demo(base_url: str, model: str, max_files: int, slot: int) -> int:
                 score = _scoreboard(result_baseline, result_hive)
             live.update(Group(top, Panel(feat), Panel(score)))
             time.sleep(0.25)
+
+        # Final frame: both result_* dicts are complete; refresh elapsed from metrics.
+        with lock:
+            if result_baseline:
+                baseline_state.update(result_baseline)
+                baseline_state["elapsed_s"] = float(result_baseline.get("wall_s", 0.0))
+                baseline_state["status"] = "done"
+            if result_hive:
+                hive_state.update(result_hive)
+                hive_state["elapsed_s"] = float(result_hive.get("wall_s", 0.0))
+                hive_state["status"] = "done"
+            left = _state_panel("Baseline (JSON transcript)", baseline_state)
+            right = _state_panel("HiveClaw (slab coordination)", hive_state)
+            score = _scoreboard(result_baseline, result_hive)
+        top = Table.grid(expand=True)
+        top.add_column(ratio=1)
+        top.add_column(ratio=1)
+        top.add_row(left, right)
+        try:
+            rows = dash.snapshot(slot_index=slot, top_k=8)
+            feat = FeatureDashboard.render_table(rows)
+        except Exception:
+            feat = FeatureDashboard.render_table([])
+        live.update(Group(top, Panel(feat), Panel(score)))
 
     tb.join(timeout=1.0)
     th.join(timeout=1.0)
