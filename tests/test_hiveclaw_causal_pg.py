@@ -460,6 +460,41 @@ class TestPostgresNetworkedRewind(unittest.TestCase):
         p.join(timeout=5)
         proxy.close()
 
+    def test_logical_backup_restore_and_verify(self) -> None:
+        from hiveclaw_causal.backup import postgres_logical_backup
+        from hiveclaw_causal.fixture import build_rewind_fixture
+        from hiveclaw_causal.rewind import RewindRuntime
+        from hiveclaw_causal.verify import verify_store
+
+        src_schema = new_schema_name("bak")
+        dst_schema = new_schema_name("rst")
+        src = PgStore(self.dsn, schema=src_schema)
+        try:
+            rt = RewindRuntime.create("pg", store=src)
+            rt.ingest_and_propose(build_rewind_fixture(seed=42))
+            before = verify_store(src)
+            self.assertTrue(before["ok"], before)
+            n_events = before["events"]
+            n_objects = before["objects"]
+        finally:
+            src.close()
+        report = postgres_logical_backup(self.dsn, src_schema, dst_schema)
+        self.assertTrue(report["ok"], report)
+        dest = PgStore(self.dsn, schema=dst_schema, read_only=True)
+        try:
+            after = verify_store(dest)
+            self.assertTrue(after["ok"], after)
+            self.assertEqual(after["events"], n_events)
+            self.assertEqual(after["objects"], n_objects)
+        finally:
+            dest.close()
+        write = PgStore(self.dsn, schema=dst_schema)
+        try:
+            leased = write.try_lease_one_task("post-restore", "2026-08-31T00:00:00Z")
+            self.assertIsNotNone(leased)
+        finally:
+            write.close()
+
 
 if __name__ == "__main__":
     unittest.main()

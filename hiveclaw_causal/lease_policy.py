@@ -8,6 +8,7 @@ after a dropped connection. These constants are the hard ceiling.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 LEASE_TTL_DEFAULT_S = 30.0
 LEASE_TTL_CEILING_S = 30.0
@@ -30,3 +31,58 @@ def clamp_lease_ttl_s(requested: float, *, max_ttl_s: float) -> float:
     if not math.isfinite(requested) or requested <= 0:
         return min(LEASE_TTL_DEFAULT_S, cap)
     return min(float(requested), cap)
+
+
+def requested_ttl_for_log(requested: float) -> float | None:
+    if not math.isfinite(requested):
+        return None
+    return float(requested)
+
+
+def apply_lease_observe(
+    payload: dict[str, Any],
+    *,
+    worker_id: str,
+    lease_until: float,
+    ttl_requested: float,
+    ttl_granted: float,
+    now: float,
+    reclaim: bool,
+    previous_owner: Any,
+) -> dict[str, Any]:
+    """Fields operators can read; heartbeats still do not append events."""
+    req = requested_ttl_for_log(ttl_requested)
+    out = {
+        **payload,
+        "lease_owner": worker_id,
+        "lease_until": lease_until,
+        "lease_acquired_at": now,
+        "ttl_requested_s": req,
+        "ttl_granted_s": ttl_granted,
+        "ttl_clamped": req is None or ttl_granted + 1e-9 < req,
+        "renewal_count": 0,
+    }
+    if reclaim:
+        out["reclaimed_from"] = previous_owner
+        out["reclaim_count"] = int(payload.get("reclaim_count") or 0) + 1
+    else:
+        out["reclaim_count"] = int(payload.get("reclaim_count") or 0)
+    return out
+
+
+def apply_renew_observe(
+    payload: dict[str, Any],
+    *,
+    lease_until: float,
+    ttl_requested: float,
+    ttl_granted: float,
+) -> dict[str, Any]:
+    req = requested_ttl_for_log(ttl_requested)
+    return {
+        **payload,
+        "lease_until": lease_until,
+        "ttl_requested_s": req,
+        "ttl_granted_s": ttl_granted,
+        "ttl_clamped": req is None or ttl_granted + 1e-9 < req,
+        "renewal_count": int(payload.get("renewal_count") or 0) + 1,
+    }

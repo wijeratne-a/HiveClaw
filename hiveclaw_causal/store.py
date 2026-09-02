@@ -12,6 +12,8 @@ from .lease_policy import (
     LEASE_TTL_CEILING_S,
     LEASE_TTL_DEFAULT_S,
     LEASE_TTL_TRIGGER_SLACK_S,
+    apply_lease_observe,
+    apply_renew_observe,
     clamp_lease_ttl_s,
     configured_max_ttl_s,
 )
@@ -88,26 +90,38 @@ def conditions_from_json(raw: str) -> tuple[InvalidationCondition, ...]:
     )
 
 
-def open_store(locator: str) -> Store:
+def open_store(
+    locator: str,
+    *,
+    read_only: bool = False,
+    max_lease_ttl_s: float | None = None,
+) -> Store:
     """Open SQLite Store or Postgres PgStore from a path or JSON locator.
 
     JSON locator: ``{"dsn": "postgresql://...", "schema": "hc_abc"}``.
+    Postgres URLs (``postgres://`` / ``postgresql://``) are accepted.
+    ``read_only=True`` must not CREATE/INSERT (verify-store / store-status).
     """
     if locator.startswith("{"):
         spec = json.loads(locator)
         from .pg_store import PgStore
 
         max_ttl = spec.get("max_lease_ttl_s")
+        if max_lease_ttl_s is not None:
+            max_ttl = max_lease_ttl_s
         return PgStore(  # type: ignore[return-value]
             str(spec["dsn"]),
             schema=str(spec["schema"]),
             max_lease_ttl_s=None if max_ttl is None else float(max_ttl),
+            read_only=read_only,
         )
     if locator.startswith("postgres"):
         from .pg_store import PgStore
 
-        return PgStore(locator)  # type: ignore[return-value]
-    return Store(locator)
+        return PgStore(  # type: ignore[return-value]
+            locator, max_lease_ttl_s=max_lease_ttl_s, read_only=read_only
+        )
+    return Store(locator, max_lease_ttl_s=max_lease_ttl_s, read_only=read_only)
 
 
 class Store:
@@ -116,16 +130,27 @@ class Store:
         db_path: Path | str,
         *,
         max_lease_ttl_s: float | None = None,
+        read_only: bool = False,
     ) -> None:
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.backend = "sqlite"
+        self.read_only = read_only
         self.max_lease_ttl_s = configured_max_ttl_s(max_lease_ttl_s)
+        if read_only:
+            uri = f"file:{self.db_path.resolve().as_posix()}?mode=ro"
+            self._conn = sqlite3.connect(uri, uri=True, timeout=30.0)
+            self._conn.row_factory = sqlite3.Row
+            return
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=8000")
         self._init_schema()
         self._write_lease_config()
+        from .schema import stamp_current
+
+        stamp_current(self)
 
     def close(self) -> None:
         self._conn.close()
@@ -480,6 +505,10 @@ class Store:
         rows = self._conn.execute("SELECT * FROM events ORDER BY seq").fetchall()
         return [self._row_to_event(r) for r in rows]
 
+    def all_edges(self) -> list[Edge]:
+        rows = self._conn.execute("SELECT * FROM edges ORDER BY id").fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
     def try_lease_one_task(
         self,
         worker_id: str,
@@ -527,13 +556,16 @@ class Store:
             rec = self._row_to_record(row)
             previous_owner = rec.payload.get("lease_owner")
             reclaim = rec.status == TaskStatus.LEASED.value
-            payload = {
-                **rec.payload,
-                "lease_owner": worker_id,
-                "lease_until": lease_until,
-            }
-            if reclaim:
-                payload["reclaimed_from"] = previous_owner
+            payload = apply_lease_observe(
+                rec.payload,
+                worker_id=worker_id,
+                lease_until=lease_until,
+                ttl_requested=lease_ttl_s,
+                ttl_granted=ttl,
+                now=now,
+                reclaim=reclaim,
+                previous_owner=previous_owner,
+            )
             cas_status = (
                 TaskStatus.LEASED.value if reclaim else TaskStatus.PENDING.value
             )
@@ -570,6 +602,9 @@ class Store:
                     "lease_owner": worker_id,
                     "lease_until": lease_until,
                     "reclaimed": reclaim,
+                    "ttl_requested_s": payload.get("ttl_requested_s"),
+                    "ttl_granted_s": ttl,
+                    "ttl_clamped": payload.get("ttl_clamped"),
                 },
                 commit=False,
             )
@@ -608,7 +643,12 @@ class Store:
                 raise ValueError(
                     f"{task_id} owned by {rec.payload.get('lease_owner')} not {worker_id}"
                 )
-            payload = {**rec.payload, "lease_until": lease_until}
+            payload = apply_renew_observe(
+                rec.payload,
+                lease_until=lease_until,
+                ttl_requested=lease_ttl_s,
+                ttl_granted=ttl,
+            )
             cur = self._conn.execute(
                 """
                 UPDATE objects SET payload = ?, updated_at = ?
@@ -632,6 +672,12 @@ class Store:
         rec = self.get(task_id)
         if rec.kind != ObjectKind.TASK:
             raise ValueError(f"{task_id} is not a task")
+        if rec.status == TaskStatus.DONE.value:
+            if rec.payload.get("completed_by") == worker_id:
+                return rec
+            raise ValueError(
+                f"{task_id} already completed by {rec.payload.get('completed_by')}"
+            )
         if rec.status != TaskStatus.LEASED.value:
             raise ValueError(f"{task_id} status {rec.status} is not leased")
         if rec.payload.get("lease_owner") != worker_id:

@@ -18,6 +18,8 @@ from .lease_policy import (
     LEASE_TTL_CEILING_S,
     LEASE_TTL_DEFAULT_S,
     LEASE_TTL_TRIGGER_SLACK_S,
+    apply_lease_observe,
+    apply_renew_observe,
     clamp_lease_ttl_s,
     configured_max_ttl_s,
 )
@@ -89,15 +91,24 @@ class PgStore:
         *,
         schema: str = "public",
         max_lease_ttl_s: float | None = None,
+        read_only: bool = False,
     ) -> None:
         require_psycopg()
         assert psycopg is not None
         assert dict_row is not None
         self.dsn = dsn
         self.schema = _check_schema(schema)
+        self.backend = "postgres"
+        self.read_only = read_only
         self.db_path = Path(f"pg:{self.schema}")
         self.max_lease_ttl_s = configured_max_ttl_s(max_lease_ttl_s)
         self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        if read_only:
+            self._conn.execute(f'SET search_path TO "{self.schema}", public')
+            self._conn.execute("SET default_transaction_read_only = on")
+            if not self._schema_ready():
+                raise RuntimeError(f"read-only open: schema {self.schema!r} has no objects table")
+            return
         self._ensure_schema()
         if not self._schema_ready():
             self._conn.execute(
@@ -113,6 +124,9 @@ class PgStore:
                 )
         self._ensure_lease_schema()
         self._write_lease_config()
+        from .schema import stamp_current
+
+        stamp_current(self)
 
     def close(self) -> None:
         self._conn.close()
@@ -548,6 +562,10 @@ class PgStore:
         rows = self._conn.execute("SELECT * FROM events ORDER BY seq").fetchall()
         return [self._row_to_event(r) for r in rows]
 
+    def all_edges(self) -> list[Edge]:
+        rows = self._conn.execute("SELECT * FROM edges ORDER BY id").fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
     def try_lease_one_task(
         self,
         worker_id: str,
@@ -588,13 +606,16 @@ class PgStore:
             rec = self._row_to_record(row)
             previous_owner = rec.payload.get("lease_owner")
             reclaim = rec.status == TaskStatus.LEASED.value
-            payload = {
-                **rec.payload,
-                "lease_owner": worker_id,
-                "lease_until": lease_until,
-            }
-            if reclaim:
-                payload["reclaimed_from"] = previous_owner
+            payload = apply_lease_observe(
+                rec.payload,
+                worker_id=worker_id,
+                lease_until=lease_until,
+                ttl_requested=lease_ttl_s,
+                ttl_granted=ttl,
+                now=now,
+                reclaim=reclaim,
+                previous_owner=previous_owner,
+            )
             cas_status = (
                 TaskStatus.LEASED.value if reclaim else TaskStatus.PENDING.value
             )
@@ -630,6 +651,9 @@ class PgStore:
                     "lease_owner": worker_id,
                     "lease_until": lease_until,
                     "reclaimed": reclaim,
+                    "ttl_requested_s": payload.get("ttl_requested_s"),
+                    "ttl_granted_s": ttl,
+                    "ttl_clamped": payload.get("ttl_clamped"),
                 },
                 commit=False,
             )
@@ -659,7 +683,12 @@ class PgStore:
                 raise ValueError(
                     f"{task_id} owned by {rec.payload.get('lease_owner')} not {worker_id}"
                 )
-            payload = {**rec.payload, "lease_until": lease_until}
+            payload = apply_renew_observe(
+                rec.payload,
+                lease_until=lease_until,
+                ttl_requested=lease_ttl_s,
+                ttl_granted=ttl,
+            )
             cur = self._conn.execute(
                 """
                 UPDATE objects SET payload = %s, updated_at = %s
@@ -678,6 +707,12 @@ class PgStore:
         rec = self.get(task_id)
         if rec.kind != ObjectKind.TASK:
             raise ValueError(f"{task_id} is not a task")
+        if rec.status == TaskStatus.DONE.value:
+            if rec.payload.get("completed_by") == worker_id:
+                return rec
+            raise ValueError(
+                f"{task_id} already completed by {rec.payload.get('completed_by')}"
+            )
         if rec.status != TaskStatus.LEASED.value:
             raise ValueError(f"{task_id} status {rec.status} is not leased")
         if rec.payload.get("lease_owner") != worker_id:
