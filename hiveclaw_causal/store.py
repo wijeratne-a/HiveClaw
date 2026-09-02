@@ -148,6 +148,7 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS idx_reverse_target ON reverse_deps(target_id);
             CREATE INDEX IF NOT EXISTS idx_events_object ON events(object_id);
+            CREATE INDEX IF NOT EXISTS idx_objects_kind_status ON objects(kind, status);
             """
         )
         self._conn.commit()
@@ -360,6 +361,20 @@ class Store:
             (target_id,),
         ).fetchall()
         return [(str(r["dependent_id"]), str(r["edge_id"]), str(r["rule"])) for r in rows]
+
+    def dependent_tasks(self, target_id: str) -> list[Record]:
+        """Tasks indexed as depending on target_id. Does not scan the full task table."""
+        rows = self._conn.execute(
+            """
+            SELECT o.*
+            FROM reverse_deps r
+            JOIN objects o ON o.id = r.dependent_id
+            WHERE r.target_id = ? AND o.kind = ?
+            ORDER BY o.id
+            """,
+            (target_id, ObjectKind.TASK.value),
+        ).fetchall()
+        return [self._row_to_record(r) for r in rows]
 
     def edges_to(self, dst: str, mode: EdgeMode | None = None) -> list[Edge]:
         if mode is None:

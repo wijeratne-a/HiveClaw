@@ -553,6 +553,18 @@ class RewindRuntime:
             rec, ts=ts, event_type="schedule_task", reason=f"schedule {tid}"
         )
         self.work.touch(tid)
+        target = payload.get("target_id")
+        if target:
+            self.store.add_edge(
+                Edge(
+                    id=f"edge-depends-{tid}-{target}",
+                    src=tid,
+                    dst=str(target),
+                    mode=EdgeMode.DEPENDS_ON,
+                    rule=InvalidationRule.HARD_STALE,
+                    declared_effect="task is in the reverse-dep cone of its target",
+                )
+            )
         return rec
 
     def _repair_targeted(self, obs: Record) -> None:
@@ -629,7 +641,9 @@ class RewindRuntime:
         )
         scheduled.append(TASK_VERIFY)
 
-        for task in self.store.objects_of(ObjectKind.TASK):
+        # Walk reverse_deps from the cone only. Do not objects_of(TASK): that
+        # inspects every unrelated queue item and is why eval_steps tracked N.
+        for task in _tasks_in_cone(self.store, cone):
             self.work.inspect(task.id)
             if task.id in scheduled:
                 continue
@@ -648,7 +662,7 @@ class RewindRuntime:
                 skipped.append(
                     (
                         task.id,
-                        f"unrelated to invalidated cone of {obs.id}; target={target or 'none'}",
+                        f"in reverse-dep cone of {obs.id} but not selected; target={target or 'none'}",
                     )
                 )
 
@@ -825,3 +839,15 @@ def _transitive_dependents(store: Store, origin_id: str) -> set[str]:
         for dep, _, _ in store.reverse_lookup(n):
             queue.append(dep)
     return cone
+
+
+def _tasks_in_cone(store: Store, cone: set[str]) -> list[Record]:
+    """Tasks reachable from the invalidated cone via reverse_deps, plus tasks in the cone."""
+    found: dict[str, Record] = {}
+    for oid in cone:
+        rec = store.get_or_none(oid)
+        if rec is not None and rec.kind == ObjectKind.TASK:
+            found[rec.id] = rec
+        for task in store.dependent_tasks(oid):
+            found[task.id] = task
+    return [found[k] for k in sorted(found)]

@@ -116,10 +116,16 @@ class InvalidationEngine:
     ) -> None:
         if object_id in stack:
             return
-        self.counter.inspect(object_id)
         rec = self.store.get_or_none(object_id)
         if rec is None:
             return
+        # Tasks are indexed in reverse_deps so repair can find the cone without
+        # scanning the queue. They are not status-propagation nodes: a challenged
+        # claim must not flip every depending task to stale (that would change
+        # lease/skip semantics). Scheduling decides skip vs run.
+        if rec.kind == ObjectKind.TASK:
+            return
+        self.counter.inspect(object_id)
         new_status = next_status(rec.kind, rule)
         if self.store.has_applied(object_id, edge_id, new_status):
             return

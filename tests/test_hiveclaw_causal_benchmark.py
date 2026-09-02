@@ -55,6 +55,21 @@ class TestTargetedVsNaive(unittest.TestCase):
         self.assertTrue(targeted.rollback_blocked)
         self.assertAlmostEqual(targeted.support_pct, 92.0, places=1)
 
+    def test_targeted_eval_steps_do_not_scan_unrelated_tasks(self) -> None:
+        """Reverse-dep cone lookup must not inspect every extra unrelated task."""
+        _rt0, base = measure_repair(self.dir / "b0.sqlite", mode="targeted", seed=42)
+        _rt1, scaled = measure_repair(
+            self.dir / "b1.sqlite",
+            mode="targeted",
+            seed=42,
+            extra_unrelated=29,
+            extra_related_claims=1,
+        )
+        self.assertEqual(scaled.objects_before, 100)
+        # One extra related claim is inspected by overlap; extra tasks must not.
+        self.assertLess(scaled.eval_steps - base.eval_steps, 12)
+        self.assertGreaterEqual(scaled.objects_untouched, 90)
+
 
 if __name__ == "__main__":
     unittest.main()
