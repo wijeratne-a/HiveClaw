@@ -95,7 +95,7 @@ Append-only triggers fire on Postgres (`UPDATE`/`DELETE` on `events` raise).
 
 4. **Heartbeat delay is silence.** The stall test is the GC/jitter analogue Session 6 named but did not network-test. A live worker whose renews cannot get through for longer than TTL is reclaimed. That is the existing rule, now evidenced on a delayed network path, not a new bug.
 
-5. **TCP drop does not itself release the lease.** Postgres session death is not wired to `complete_task`. The row stays `leased` until TTL. Heartbeat/TTL is the reclaim mechanism. If TTL were infinite, a dropped path would strand the task.
+5. **TCP drop does not itself release the lease.** Postgres session death is not wired to `complete_task`. The row stays `leased` until TTL. Heartbeat/TTL is the reclaim mechanism. If TTL were infinite, a dropped path would strand the task. **Session 8 closed this:** `LEASE_TTL_CEILING_S = 30` is enforced in Python and by a store trigger; a client-requested 3600s TTL is clamped. See `docs/research/decentralization-assessment.md` and `tests/test_hiveclaw_causal_lease.py` (`test_oversized_client_ttl_does_not_strand_after_silence`).
 
 ---
 
@@ -103,9 +103,9 @@ Append-only triggers fire on Postgres (`UPDATE`/`DELETE` on `events` raise).
 
 **Bounded-cost invalidation and safe concurrent coordination still hold once a real network is in the loop — against one Postgres server.** They are not a SQLite-file-only accident.
 
-They are **not** yet a proof of stigmergy without a central store. This session replaced “one SQLite file on one machine” with “one Postgres on a TCP hop, many client processes.” That is a real step (shared file handle is gone; connection drop is tested). It is still a **single shared server**.
+They are **not** proof of stigmergy without a central store. This session replaced “one SQLite file on one machine” with “one Postgres on a TCP hop, many client processes.” That is a real step (shared file handle is gone; connection drop is tested). It is still a **single shared server**.
 
-The moat claim (“coordination without a central manager”) remains open. A favorable result here must not be read as closing it.
+Session 8’s assessment: **decentralization is out of current scope** (fundamental redesign), not an open experiment to keep stacking backends against. The evidenced claim is a centralized causal store with concurrent clients. Do not read a green TCP run as “no central manager.”
 
 ---
 

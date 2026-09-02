@@ -296,12 +296,19 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 
 ## Session log
 
+### 2026-09-01 — Session 8 TTL ceiling + decentralization scope-lock
+
+- Strand test failed first (`max_lease_ttl_s` missing / 3600s would not expire in 1.25s). Ceiling 30s + store max + triggers. Same test + Postgres TCP-drop with client 3600s now reclaim within 1s store max. Slow-alive still green.
+- Memo: `docs/research/decentralization-assessment.md` — **No**, not without a fundamental redesign. Evidenced claim: centralized causal store, concurrent clients.
+- Docs/ADR/checkpoint updated. No third storage backend.
+- Demo WIP left unstaged.
+
 ### 2026-09-01 — Session 7 first networked backend (Postgres over TCP)
 
 - Scope named before code: one Postgres server over TCP, not multi-master stigmergy.
 - `PgStore` + `TcpProxy`. exp-004-multi-host: eval_steps still flat (tasks 6/7/8/8 vs naive 19/108/509/2009; claims 6 vs 19/519/2019). 92.0% unchanged. Wall-clock gap shrinks/jitters vs SQLite.
 - Leases: 5×3×8, SIGKILL, slow-alive, TCP-drop reclaim (process alive), stall>TTL false-reclaim.
-- Risk 1 restated: shared-nothing stigmergy still open. Not “single SQLite file” anymore.
+- Risk 1 restated then: shared-nothing stigmergy still open (Session 8: marked **out of scope**). Not “single SQLite file” anymore.
 - `make test-causal` 31 OK + 8 skipped. Networked 8/8 with DSN. Demo WIP left unstaged.
 
 ### 2026-09-02 — Session 6 commit, claim topic index, lease heartbeat
@@ -389,3 +396,4 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 - Concurrent leases: `docs/research/experiments/exp-003-concurrent-leases.md`
 - Lease crash/churn: `docs/research/experiments/exp-004-lease-expiry-and-churn.md`
 - Networked backend: `docs/research/experiments/exp-004-multi-host.md`
+- Decentralization (out of scope): `docs/research/decentralization-assessment.md`

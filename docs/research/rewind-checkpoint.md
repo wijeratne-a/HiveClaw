@@ -4,11 +4,13 @@ Distinguish **proven** (command ran) vs **implemented but not separately measure
 
 ---
 
-## State of evidence (Session 7, 2026-09-01)
+## State of evidence (Session 8, 2026-09-01)
 
-HEAD of this session: `68d1f59` on `origin/main`. CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33578062030 (`test-causal` success). Interpreter: `.venv/bin/python` 3.11.1. Causal suite after Session 7: `make test-causal` → **31 tests OK + 8 Postgres skipped** (no DSN), mypy 25 files. Networked suite with DSN: **8/8 OK**.
+HEAD will be this session’s commits on `origin/main`. Interpreter: `.venv/bin/python` 3.11.1.
 
-This is not a closeness-to-revolution score. Flat eval_steps is a **bounded-cost coordination property on this fixture**. Session 7 showed it still holds against **one Postgres over TCP**, not only one SQLite file. It is still **not** a no-central-server stigmergy result.
+**Evidenced claim (precise):** Rewind is a **centralized causal store** (one SQLite file or one Postgres server) with **safe concurrent multi-process and networked clients**: bounded-cost invalidation on this fixture, append-only events, TTL/heartbeat leases, and a hard TTL ceiling so a client cannot strand work with an infinite/hour-long lease. It is **not** “no central manager” and **not** decentralized stigmergy.
+
+This is not a closeness-to-revolution score.
 
 ### Original four guarantees
 
@@ -34,9 +36,10 @@ This is not a closeness-to-revolution score. Flat eval_steps is a **bounded-cost
 | Multi-process leases, no worker messaging | **Evidenced** | SQLite exp-003: 5×3×8, **0 double-lease**. Postgres Session 7: same, 0 doubles. |
 | Dead / silent worker’s lease is **reclaimed** | **Evidenced** | SQLite SIGKILL. Postgres SIGKILL and **TCP drop with process still alive**. |
 | Slow-alive worker that **renews** is **not** reclaimed | **Evidenced (Session 6–7)** | SQLite and Postgres: 0.7 s work, 0.2 s TTL, renew every 0.05 s; poacher `None`. |
-| Heartbeat delayed longer than TTL (stall, not death) | **Evidenced (Session 7)** | Proxy stall 0.45 s, TTL 0.2 s: poacher reclaims the live worker. Silence = reclaim. |
-| Drain under **continuous insert** | **Evidenced, small N, SQLite only** | 24 tasks / 3 workers. Not re-run on Postgres this session. |
-| Multi-host stigmergy / no central store | **Untested** | Session 7 is one Postgres server over TCP. Slab `claim_task` ≠ this queue. Two Rewind stores with no shared DB: not built. |
+| Heartbeat delayed longer than TTL (stall, not death) | **Evidenced (Session 7)** | Proxy stall > TTL: poacher reclaims the live worker. Silence = reclaim. |
+| Unbounded / huge client TTL can strand after TCP drop | **Closed (Session 8)** | `LEASE_TTL_CEILING_S = 30` in Python + `lease_config` + INSERT/UPDATE trigger. Client 3600s or `inf` is clamped. SQLite silence + Postgres TCP-drop tests reclaim within a 1s store max. |
+| Drain under **continuous insert** | **Evidenced, small N, SQLite only** | 24 tasks / 3 workers. Not re-run on Postgres. |
+| Multi-host stigmergy / no central store | **Out of scope** | Not “untested, try next session.” The data model **requires** one authoritative store. See `docs/research/decentralization-assessment.md`. |
 | LLM-free outage % | **Evidenced** | seed 42 → **92.0** (SQLite and Postgres). |
 
 ### Smaller in practice than the original efficiency story
@@ -50,15 +53,36 @@ This is not a closeness-to-revolution score. Flat eval_steps is a **bounded-cost
 - Ironclad burn-in, `integration_test.py --stress`, Phase 7 goldens.
 - Any coupling of this causal graph to the Metal/IOSurface slab.
 - Continuous-insert drain on Postgres (SQLite only).
-- Two independent Rewind stores merging without a shared server.
+- Two independent Rewind stores merging without a shared server — **not an untested extra; Session 8 marks it a redesign, out of scope.**
 
 ### Largest remaining risks (severity order)
 
-1. **Open — no shared-nothing / multi-master stigmergy (still the largest thesis risk).** Session 7 closed “this only works as a local SQLite file.” It did **not** close “coordination without a central manager.” Everything networked here talks to **one Postgres**. Partitions between two causal stores, replica lag, CRDT/merge, and the IOSurface slab remain untested. A green TCP run is adjacent to the moat claim, not proof of it.
-2. **Closed Session 6 — claim-side O(N) overlap scan.** Unrelated claims at C=500 and C=2000 keep targeted eval_steps at **6** vs naive 519 / 2019 (SQLite and Postgres). Limit named: lookup is `topic-provider-status`, not `dependent_claims(obs.id)`.
-3. **Closed Session 6–7 — TTL reclaim vs slow-alive, including network failure.** Heartbeat keeps a 0.7 s worker under a 0.2 s TTL on SQLite and Postgres. SIGKILL without renew is reclaimed. TCP drop with the process still alive is reclaimed after TTL. **Evidenced limit:** a stall longer than TTL false-reclaims a live worker (delayed heartbeat = silence).
+1. **Out of scope — decentralized / “no central manager” stigmergy.** Session 8’s answer is **no**: the event log, reverse-deps index, and lease CAS require a single authoritative store. SQLite and Postgres are the same architecture. This is no longer listed as the next experiment; it is a different product. Memo: `docs/research/decentralization-assessment.md`.
+2. **Closed Session 6 — claim-side O(N) overlap scan.** Unrelated claims at C=500 and C=2000 keep targeted eval_steps at **6** vs naive 519 / 2019. Limit: `topic-provider-status`, not `dependent_claims(obs.id)`.
+3. **Closed Session 8 — TTL-strand / unbounded lease.** Absolute ceiling 30s (schema CHECK + trigger + Python clamp). Store may set a stricter max (tests use 1s). Slow-alive + renew still holds. Remaining operational limit: silence (no heartbeat, including stalled network) is reclaimed after the **clamped** TTL, not after process death.
 
-If the claim is “this replaces a manager / bus / slab for agents,” that is **not evidenced** (risk 1). If the claim is “Rewind skips unrelated tasks and unrelated non-provider claims on this fixture, blocks rollback for documented reasons, and a CAS queue can drain over a TCP database, reclaim silence and dropped connections, and respect heartbeats until the path stalls past TTL,” that **is** evidenced.
+If the claim is “this replaces a manager / bus / slab for agents,” that is **not evidenced and not in scope** for this runtime. If the claim is “Rewind is a centralized causal store: it skips unrelated tasks and non-provider claims on this fixture, blocks rollback for documented reasons, and a CAS queue can drain over a file or a TCP database, reclaim silence and dropped connections, respect heartbeats, and refuse an indefinite TTL,” that **is** evidenced.
+
+---
+
+## Session 8 — 2026-09-01 (TTL ceiling + scope-lock)
+
+### Part 1 — strand risk
+
+Failing test first: `test_oversized_client_ttl_does_not_strand_after_silence` (`Store(..., max_lease_ttl_s=1.0)` unexpected kwarg, then client 3600s would have left ~3600s on the row). Fix: `hiveclaw_causal/lease_policy.py` `LEASE_TTL_CEILING_S = 30`, `lease_config`, SQLite/Postgres triggers, clamp on `try_lease_one_task` / `renew_lease`. Same test then passes; inf clamped; raw SQL `lease_until` beyond ceiling aborted. Postgres: `test_oversized_ttl_tcp_drop_is_reclaimed_within_ceiling`. SQLite and Postgres lease suites re-run; slow-alive still green.
+
+### Part 2 — memo
+
+`docs/research/decentralization-assessment.md`: **No**, not without a fundamental redesign.
+
+### Part 3 — framing
+
+This file, the ADR, exp-004-multi-host, CONTEXT: “no central manager” is not a proven property and is not the near-term roadmap.
+
+### Local suite after Session 8
+
+`make test-causal` → **34 tests OK**, 9 Postgres skipped, mypy 26 files.  
+`HIVECLAW_PG_DSN=... python -m unittest tests.test_hiveclaw_causal_pg -v` → **9/9 OK** (includes oversized-TTL TCP drop).
 
 ---
 
@@ -75,7 +99,7 @@ CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33578062030 job `test-c
 
 ### Part 3 — verdict
 
-Bounded eval_steps and lease safety **held** on a real TCP hop to a single server. Wall-clock advantage **degraded**. Central-manager-free stigmergy **still open**.
+Bounded eval_steps and lease safety **held** on a real TCP hop to a single server. Wall-clock advantage **degraded**. “No central manager” was still unproven (Session 8 later: **out of scope**, not a pending backend).
 
 ### Part 4 — this risk ranking
 

@@ -37,7 +37,8 @@ A half-day bake-off was **not** run: there was nothing real to measure against. 
 - Status changes always append a `CausalEvent` with `old_status`, `new_status`, `reason`, `edge_id`, `rule` before updating the projection.
 - Policy may **propose** nothing; workers may propose actions; only `policy.authorize()` flips an action to `approved` / keeps `blocked`.
 - Existing Metal/MLX stack is untouched. Do not put this module under `hiveclaw_python` (Darwin+mlx import guard).
-- Deferred: patch worker, experiment planner, UI projection, multi-process leases beyond a single-writer SQLite demo.
+- Deferred: patch worker, experiment planner, UI projection.
+- **Not deferred as a small follow-on:** multi-master / “no central manager.” Session 8: the event log + reverse_deps + lease CAS **require one authoritative store**. Independent reconciling stores would be a fundamental redesign (`docs/research/decentralization-assessment.md`). Proven shape: centralized causal store, concurrent clients.
 
 ## Evidence
 
