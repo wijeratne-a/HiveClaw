@@ -6,7 +6,7 @@ Distinguish **proven** (command ran) vs **implemented but not separately measure
 
 ## State of evidence (Session 7, 2026-09-01)
 
-HEAD before this session: `0a557b2` (Session 6) on `origin/main`. Interpreter: `.venv/bin/python` 3.11.1. Causal suite after Session 7: `make test-causal` → **31 tests OK + 8 Postgres skipped** (no DSN), mypy 25 files. Networked suite with DSN: **8/8 OK**.
+HEAD of this session: `68d1f59` on `origin/main`. CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33578062030 (`test-causal` success). Interpreter: `.venv/bin/python` 3.11.1. Causal suite after Session 7: `make test-causal` → **31 tests OK + 8 Postgres skipped** (no DSN), mypy 25 files. Networked suite with DSN: **8/8 OK**.
 
 This is not a closeness-to-revolution score. Flat eval_steps is a **bounded-cost coordination property on this fixture**. Session 7 showed it still holds against **one Postgres over TCP**, not only one SQLite file. It is still **not** a no-central-server stigmergy result.
 
@@ -70,7 +70,8 @@ Named in `docs/research/experiments/exp-004-multi-host.md` before `PgStore` exis
 
 ### Part 2 — what ran
 
-Docker `postgres:16` on port 55432. `PgStore` + `TcpProxy`. Scaling table and 8/8 networked tests in that experiment file. Local `make test-causal` without DSN: 31 OK + 8 skipped, mypy 25 files.
+Docker `postgres:16` on port 55432. `PgStore` + `TcpProxy`. Scaling table and 8/8 networked tests in that experiment file. Local `make test-causal` without DSN: 31 OK + 8 skipped, mypy 25 files.  
+CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33578062030 job `test-causal` success.
 
 ### Part 3 — verdict
 
