@@ -296,6 +296,14 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 
 ## Session log
 
+### 2026-09-02 — Session 6 commit, claim topic index, lease heartbeat
+
+- Session 5 four commits pushed; CI https://github.com/wijeratne-a/HiveClaw/actions/runs/33575886839 success on `9c64bd9`.
+- Claims: `topic-provider-status` in reverse_deps (not obs cone). C=2000 eval 6 vs 2019.
+- Lease `renew_lease`: slow-alive kept; SIGKILL still reclaimed.
+- Risk ranking: (1) single-host open, (2) claim O(N) closed, (3) slow-vs-dead closed as heartbeat/silence.
+- `make test-causal` 31 OK. Demo WIP left unstaged.
+
 ### 2026-09-01 — Session 5 efficiency curve + lease crash/churn
 
 - Tasks indexed in `reverse_deps` (`depends_on` target). Repair no longer scans all tasks. Engine skips TASK on status fan-out.

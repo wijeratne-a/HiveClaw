@@ -53,15 +53,32 @@ N=12 eval_steps dropped 7 → 6 because `task-unrelated-docs` is no longer inspe
 - **Eval steps:** targeted is now **flat with N** for this fixture (6 → 8 → 10 → 10). The +2 from N=12 to N=100 is the extra related claim in the overlap scan, not the 29 extra tasks. Naive remains ≈ objects_after (19 / 109 / 511 / 2011).
 - **Does the gap grow faster than linearly?** The **eval-step difference** naive − targeted is ≈ N (13, 101, 501, 2001). That is **linear in N**, which is the best this comparison can do once targeted is O(cone) and naive is O(N). It is not superlinear. The **ratio** naive/targeted grows ~linearly with N (about 3×, 14×, 51×, 201×).
 - **Wall-clock:** targeted stays ~3 ms from N=12 through N=2000. Naive ~3 ms → ~4 ms → ~12 ms → ~41–46 ms. At N=500 the gap is ~9 ms (larger than Session 4’s 6–7 ms because targeted got cheaper, not because naive got worse). At N=2000 the gap is ~38–43 ms. Absolute times are still **tens of milliseconds** on this machine.
-- **Remaining eval-step limiter:** `apply_provider_overlap_rule` still inspects **every claim**. Extra unrelated units in this fixture are artifact/observation/task triples, not claims, so that term stays small. If claims scaled like tasks, overlap would become the next linear scan.
+- **Remaining eval-step limiter (Session 5):** `apply_provider_overlap_rule` still inspected **every claim**. Extra unrelated units in the task-scale fixture are artifact/observation/task triples, not claims.
+
+## Session 6 — unrelated claims (topic index, not observation cone)
+
+**Date:** 2026-09-02  
+**Structural note:** Claims cannot be found the same way tasks are. A new `provider_outage` observation has **no reverse_deps** to existing claims until the overlap rule fires a `contradicts` edge. `dependent_claims(obs.id)` would be empty. Provider-interested claims are instead `depends_on` a stable topic key `topic-provider-status` at create time; overlap uses `dependent_claims(topic)`. Same index, different key. Unrelated claims (no provider mention) are not indexed and not inspected.
+
+**Command:** `measure_repair(..., extra_unrelated_claims=C)` seed 42.
+
+| C | before | after | touched t/n | eval t/n | wall_s run1 t/n | wall_s run2 t/n | support_pct | rollback |
+|---|--------|-------|-------------|----------|-----------------|-----------------|-------------|----------|
+| 0 | 12 | 19 | 9 / 19 | **6** / 19 | 0.002965 / 0.003016 | 0.002960 / 0.002954 | 92.0 | True |
+| 500 | 512 | 519 | 9 / 519 | **6** / 519 | 0.003266 / 0.010017 | 0.003017 / 0.009392 | 92.0 | True |
+| 2000 | 2012 | 2019 | 9 / 2019 | **6** / 2019 | 0.003816 / 0.034676 | 0.053339 / 0.030007 | 92.0 | True |
+
+Eval-steps and touched were identical across runs. Run 2 targeted wall at C=2000 (53 ms) is an outlier; three follow-up runs were 2.63 / 2.71 / 2.61 ms targeted vs 31.7 / 29.9 / 34.8 ms naive. Treat ~3 ms vs ~30–35 ms as the typical C=2000 pair.
+
+Flat targeted eval_steps (6) vs linear naive (19 → 519 → 2019) holds on **unrelated claims**, not only tasks. This is a bounded-cost coordination property on this fixture, single-host SQLite, not a general production latency claim.
 
 ## Decision
 
-**Keep** cone-indexed task lookup. The Session 4 “inspect every task to skip it” cap is gone without redesigning `reverse_deps`.
+**Keep** cone-indexed task lookup and the provider-topic claim index. Task-only O(N) was Session 5; claim-side O(N) is closed the same way on a **topic key**, not the observation cone.
 
 **Keep** objects-touched and eval-steps as primary efficiency metrics. Wall-clock now tracks naive scan cost; targeted wall-clock is dominated by a small constant cone plus SQLite.
 
-**Do not** claim superlinear eval-step savings or production latency wins.
+**Do not** claim superlinear eval-step savings, production latency wins, or that the property is “revolutionary.”
 
 ## Reproduction
 
@@ -70,4 +87,6 @@ python -m hiveclaw_causal.benchmark
 python -m hiveclaw_causal.benchmark --extra-unrelated 29 --extra-related 1
 python -m hiveclaw_causal.benchmark --extra-unrelated 162 --extra-related 2
 python -m hiveclaw_causal.benchmark --extra-unrelated 662 --extra-related 2
+python -m hiveclaw_causal.benchmark --extra-unrelated-claims 500
+python -m hiveclaw_causal.benchmark --extra-unrelated-claims 2000
 ```

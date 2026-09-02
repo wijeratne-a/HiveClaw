@@ -4,11 +4,11 @@ Distinguish **proven** (command ran) vs **implemented but not separately measure
 
 ---
 
-## State of evidence (Session 5, 2026-09-01)
+## State of evidence (Session 6, 2026-09-02)
 
-HEAD when this section was written: local `main` after Session 5 measurements (pre-commit). Interpreter: `.venv/bin/python` 3.11.1. Causal suite: `make test-causal` → **29 tests OK**, mypy 22 files.
+HEAD of Session 5 commits: `9c64bd9` on `origin/main`. CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33575886839 (`test-causal` success, `make test-causal` step green, 0 annotations). Interpreter: `.venv/bin/python` 3.11.1. Causal suite after Session 6 code: `make test-causal` → **31 tests OK**, mypy 22 files.
 
-This is not a closeness-to-revolution score. It is what the tests and experiment logs actually show.
+This is not a closeness-to-revolution score. It is what the tests and experiment logs actually show. Flat eval_steps is a **bounded-cost coordination property on this fixture, single-host only**.
 
 ### Original four guarantees
 
@@ -16,48 +16,74 @@ This is not a closeness-to-revolution score. It is what the tests and experiment
 |-----------|------------|--------|----------|
 | **A — typed provenance** | Producer, source URI, version/hash, timestamp, trust class on records | **Evidenced** | `tests/test_hiveclaw_causal_rewind.py` (`_assert_guarantee_a` on claims, observations, actions, provider artifact). Types: `SourceRef` / `Provenance`. |
 | **B — claims carry invalidation conditions** | Evidence ids, source snapshot, declared invalidation conditions | **Evidenced** | Same e2e (`_assert_guarantee_b_claim` on cache, outage, residual claims). |
-| **C — causal edges + append-only history** | Typed edges with rules; status changes append events; events cannot be UPDATE/DELETE | **Evidenced** | Engine 5/5 (`tests/test_hiveclaw_causal_engine.py`: propagation, idempotency, cycle, isolation). Store 3/3: raw `UPDATE`/`DELETE` on `events` abort (`19a112b`). Reverse index used for invalidation *and*, as of Session 5, for task-cone lookup without a full task scan. |
-| **D — deterministic policy gate** | In-process authorize/deny; LLM must not produce the decision | **Evidenced** | Policy 3/3 + e2e: rollback `allowed=False` twice with the same reason; `edge` + `rule=block_action` on the blocked action. Demo: `python -m hiveclaw_causal.demo_rewind`. |
+| **C — causal edges + append-only history** | Typed edges with rules; status changes append events; events cannot be UPDATE/DELETE | **Evidenced** | Engine 5/5. Store 3/3: raw `UPDATE`/`DELETE` on `events` abort. Reverse index used for invalidation, task-cone lookup, and provider-topic claim lookup. |
+| **D — deterministic policy gate** | In-process authorize/deny; LLM must not produce the decision | **Evidenced** | Policy 3/3 + e2e: rollback `allowed=False` twice with the same reason; `edge` + `rule=block_action`. |
 
 ### Section 4 / efficiency and coordination sub-hypotheses
 
-These are the Rewind e2e “only affected work” step plus the Session 3–4 stigmergy-on-a-number claims.
-
 | Claim | Status | Exact numbers / links |
 |-------|--------|------------------------|
-| Targeted repair reaches the **same conclusion** as naive full re-eval | **Evidenced** | 92.0% `outage_explains_pct` (seed 42), rollback blocked, follow-up present at N=12, 100, 500, 2000. exp-001, exp-002. |
-| Targeted **touches fewer objects** | **Evidenced** | N=12: 9 vs 19. N=500: 11 vs 507. N=2000: 11 vs 2007. Touched stays ~11 while naive = full graph. |
-| Targeted uses **fewer eval_steps** | **Evidenced, and the scaling story changed** | Session 4: targeted eval_steps **grew with task count** (7 → 38 → 173 at N=12/100/500) because every task was inspected to skip it. Session 5: tasks are `depends_on` their target in `reverse_deps`; repair uses `dependent_tasks` on the cone. Targeted eval_steps **6 → 8 → 10 → 10** at N=12/100/500/2000. Naive 19 / 109 / 511 / 2011. |
-| Eval-step **gap grows faster than linearly** | **Not supported** | Difference naive − targeted ≈ N (13, 101, 501, 2001): **linear**, which is what O(N) vs O(cone) predicts. Ratio grows with N (~3× → ~201×). Superlinear eval-step savings were not observed. |
-| **Wall-clock** targeted is faster | **Evidenced only at sufficient N, small absolute gap** | N=12: overlap / naive sometimes faster (~3 ms). N=500: targeted ~2.6–3.1 ms vs naive ~11.9 ms (~9 ms). N=2000: targeted ~3.0–3.2 ms vs naive ~41–46 ms (~38–43 ms). Still tens of milliseconds on this machine. exp-002. |
-| Inspecting unrelated tasks is **required** by the index | **Falsified** | Existing `reverse_deps` was sufficient once task→target edges were written. Engine skips `TASK` on status propagation so those edges do not stale the queue. Not an open TODO; not a new index. |
-| `apply_provider_overlap_rule` is O(cone) | **Assumed false / untested at claim scale** | It still inspects **every claim**. This fixture scales unrelated **tasks**, not claims (`R=1–2`). If claims grew like tasks, that scan would return. |
-| Multi-process leases, no worker messaging | **Evidenced, single host** | exp-003: 2 workers drain Rewind pending; 5 workers × 3 tasks × 8 trials, **0 double-lease, 0 dropped**. WAL + `BEGIN IMMEDIATE` + CAS on `pending`. |
-| Dead worker’s lease is **reclaimed** | **Evidenced, TTL not crash-detection** | exp-004: SIGKILL after lease; after 0.25 s TTL, survivor completes; `reclaimed_from=crasher`; `lease_reclaim` event. A slow live worker could be preempted (not tested). |
-| Drain under **continuous insert** | **Evidenced, small N** | exp-004: 24 tasks inserted while 3 workers drain; 24 unique leases, all `done`. |
-| Multi-host / IOSurface stigmergy is the same primitive | **Untested** | SQLite file on one machine. Slab `claim_task` is still slot ownership, not this queue. No second-host run. |
-| LLM-free outage % | **Evidenced** | `stats.outage_explains_pct`; seed 42 → **92.0** (92/100 timestamps). Stored as float. |
+| Targeted repair reaches the **same conclusion** as naive full re-eval | **Evidenced** | 92.0% `outage_explains_pct` (seed 42), rollback blocked, follow-up present at task-N=12/100/500/2000 and claim-C=0/500/2000. exp-001, exp-002. |
+| Targeted **touches fewer objects** | **Evidenced** | Task-N=2000: 11 vs 2007. Claim-C=2000: 9 vs 2019. |
+| Targeted uses **fewer eval_steps** (tasks) | **Evidenced** | Session 5: 6 → 8 → 10 → 10 vs naive 19 / 109 / 511 / 2011. |
+| Targeted uses **fewer eval_steps** (unrelated claims) | **Evidenced (Session 6)** | Topic index: eval **6** vs naive 19 / 519 / 2019 at C=0/500/2000. Not via the observation cone (see below). |
+| Eval-step **gap grows faster than linearly** | **Not supported** | Difference ≈ N (linear). |
+| **Wall-clock** targeted is faster | **Evidenced only at sufficient N, small absolute gap** | Typical C=2000: ~3 ms vs ~30–35 ms. One 53 ms targeted outlier recorded. Tens of milliseconds. |
+| Inspecting unrelated **tasks** is required by the index | **Falsified** | Task→target `depends_on`; `dependent_tasks` on the cone. |
+| Inspecting unrelated **claims** is required because they cannot join reverse_deps | **Falsified as O(N) scan; scoped as topic-index** | A new provider observation is **not** a reverse-dep parent of existing claims until overlap fires. Claims are indexed on `topic-provider-status` at create time. Same `reverse_deps` table, different key than the task cone. |
+| Multi-process leases, no worker messaging | **Evidenced, single host** | exp-003: 5×3×8, **0 double-lease**. |
+| Dead / silent worker’s lease is **reclaimed** | **Evidenced** | exp-004 SIGKILL: survivor completes; `reclaimed_from=crasher`. |
+| Slow-alive worker that **renews** is **not** reclaimed | **Evidenced (Session 6)** | 0.7 s work, 0.2 s TTL, renew every 0.05 s; poacher `None`; `completed_by=slow`; no `lease_reclaim`. |
+| Drain under **continuous insert** | **Evidenced, small N** | 24 tasks / 3 workers. |
+| Multi-host / IOSurface stigmergy is the same primitive | **Untested** | One SQLite file. Slab `claim_task` ≠ this queue. |
+| LLM-free outage % | **Evidenced** | seed 42 → **92.0**. |
 
 ### Smaller in practice than the original efficiency story
 
-**Eval-step scaling (named):** Until Session 5, targeted repair’s eval_steps tracked **total task count**, not the invalidated cone, because skip eligibility scanned `objects_of(TASK)`. That capped how large the efficiency advantage could look. After indexing tasks in `reverse_deps`, that particular cap is gone on this fixture: targeted eval_steps stay ~10 from N=500 to N=2000 while naive tracks N.
-
-What remains small: **wall-clock** (milliseconds, not a capacity-planning result); **claim overlap** still a full claim scan; **lease proof** still one SQLite file.
+**Eval-step scaling (named):** Session 4–5 task-scan cap is gone. Session 6 claim-scan cap is gone **for provider-interest overlap**, via a topic key, not the observation cone. Wall-clock remains milliseconds. Naive is still O(N) by design.
 
 ### Assumed but untested
 
 - Pre-Session-2 SQLite files gaining append-only triggers on next open.
-- Lease TTL vs a live worker slower than TTL.
-- Overlap-rule cost when claim count ≈ task count.
 - Multi-writer correctness beyond these process tests (not a model checker).
-- Ironclad burn-in, `integration_test.py --stress`, Phase 7 goldens (out of Rewind scope).
+- Ironclad burn-in, `integration_test.py --stress`, Phase 7 goldens.
 - Any coupling of this causal graph to the Metal/IOSurface slab.
+- A live worker that is slow **and does not renew** is treated as silent (by design, not separately tested beyond TTL reclaim).
 
-### Largest remaining risk to the core thesis
+### Largest remaining risks (severity order)
 
-The thesis under test is that a typed reverse-indexed trace lets agents **coordinate and repair locally** instead of reprocessing the world, and that this is a real coordination primitive (not a single-process demo).
+1. **Open — single-host only.** No multi-host stigmergy is tested. Every eval-step, wall-clock, and lease number is one machine and one SQLite file. The IOSurface slab is a different object. This is the largest remaining risk to the core thesis (coordination primitive vs local demo).
+2. **Closed this session — claim-side O(N) overlap scan.** Unrelated claims at C=500 and C=2000 keep targeted eval_steps at **6** vs naive 519 / 2019. Limit named: lookup is `topic-provider-status`, not `dependent_claims(obs.id)`.
+3. **Closed this session — TTL reclaim vs slow-alive.** Heartbeat `renew_lease` keeps a 0.7 s worker under a 0.2 s TTL; SIGKILL without renew is still reclaimed. Remaining sub-limit: silence (no heartbeat) is indistinguishable from death.
 
-The largest remaining risk is **scope of the coordination evidence**, not the invalidation math: every lease and efficiency number is **one machine, one SQLite file**. Crash reclaim is a **timer**, not failure detection. The product’s other “stigmergy” (IOSurface slots) is still a different object. If the claim is “this replaces a manager / bus / slab for agents,” that is **not evidenced**. If the claim is “Rewind’s graph skips unrelated work and blocks a rollback for documented reasons, and a local CAS queue can drain without double-lease in these tests,” that **is** evidenced, including a now-flat eval-step curve vs N for extra unrelated tasks.
+If the claim is “this replaces a manager / bus / slab for agents,” that is **not evidenced** (risk 1). If the claim is “Rewind skips unrelated tasks and unrelated non-provider claims on this fixture, blocks rollback for documented reasons, and a local CAS queue can drain, reclaim silence, and respect heartbeats,” that **is** evidenced.
+
+---
+
+## Session 6 — 2026-09-02 (commit Session 5, claim index, lease heartbeat)
+
+### Part 1 — Session 5 committed and CI-green
+
+Four commits on `main`, tip `9c64bd9`: `f9874a6` task index, `7eba213` exp-002, `e39e56e` lease crash/churn, `9c64bd9` evidence summary.
+
+Local post-commit: `make test-causal` 29/29 + mypy.  
+CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33575886839 job `test-causal` success (~15 s), step `make test-causal` success.
+
+### Part 2 — claim-side overlap
+
+Implemented topic index + `extra_unrelated_claims`. Numbers in exp-002 Session 6 table.
+
+### Part 3 — heartbeat
+
+`Store.renew_lease`; tests slow-alive vs SIGKILL. exp-004.
+
+### Part 4 — this risk ranking
+
+Ordered 1–3 as above.
+
+### Local suite after Session 6
+
+`make test-causal` → **31 tests OK**, mypy 22 files.
 
 ---
 

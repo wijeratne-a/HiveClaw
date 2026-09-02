@@ -7,7 +7,7 @@
 ## Hypothesis
 
 1. A worker that dies after `lease_task` and before `complete_task` (SIGKILL) does not permanently strand the task. After `lease_until`, another worker reclaims it (`lease_reclaim`) and completes it.
-2. Inserting new pending tasks **while** workers are draining (not a pre-seeded list) does not produce double-leases or drops.
+3. A worker that is **slow but alive** and **renews** `lease_until` must not be reclaimed. A worker that is **silent** (SIGKILL, no renew) must still be reclaimed after TTL.
 
 ## Baseline
 
@@ -16,7 +16,7 @@ exp-003: clean queue, workers that always complete, 5×3×8 and Rewind drain. No
 ## Method
 
 1. **Crash:** seed 1 pending task. Spawn `lease_one_and_die` (`try_lease` then `SIGKILL`). Wait until the row is `leased` by `crasher`. Sleep `ttl_s + 0.15` (ttl = 0.25 s). Main process drains as `survivor`.
-2. **Churn:** 3 spawn workers poll leases; test process inserts 24 tasks with 3 ms gaps; then writes a stop file. Workers exit after idle polls. Stop signal is a **file path** (pickle-safe under spawn); not a `multiprocessing.Event` through `Pool.map`.
+3. **Heartbeat:** `work_slow_with_renew` leases, works 0.7 s with TTL 0.2 s, renews every 0.05 s. After TTL+0.2 s a poacher `try_lease` must get nothing. Worker then completes. `test_killed_worker_lease_is_reclaimed` is the no-renewal control.
 
 `lease_until` is a unix float in JSON payload. Object `updated_at` strings are 1-second resolution and cannot express a 250 ms TTL.
 
@@ -27,28 +27,30 @@ exp-003: clean queue, workers that always complete, 5×3×8 and Rewind drain. No
 ```
 test_continuous_insert_while_workers_drain ... ok
 test_killed_worker_lease_is_reclaimed ... ok
+test_slow_alive_worker_that_renews_is_not_reclaimed ... ok
 test_more_workers_than_tasks_no_double_lease ... ok
 test_two_workers_after_rewind_injection ... ok
-Ran 4 tests in ~2.1s (full causal suite 29 tests, 2.098s)
-OK
 ```
+
+Full causal suite Session 6: **31 tests OK**.
 
 | check | result |
 |-------|--------|
-| SIGKILL mid-lease | task `done`; `completed_by=survivor`; `reclaimed_from=crasher`; `lease_reclaim` event present |
+| SIGKILL mid-lease (no renew) | task `done`; `completed_by=survivor`; `reclaimed_from=crasher`; `lease_reclaim` event present |
+| Slow-alive + renew (0.7 s work, 0.2 s TTL) | poacher gets `None`; `completed_by=slow`; no `reclaimed_from`; no `lease_reclaim` |
 | 24 inserts while 3 workers drain | 24 unique leases; all `done`; 0 doubles |
 
 ## Outcome
 
 TTL reclaim works on this machine for a kill-9 after a committed lease. Churn drain held for 24 tasks / 3 workers.
 
-Limits: reclaim is **time**, not crash detection. A live worker slower than TTL can lose the lease (not tested). Still single-node SQLite. Stop file is test harness, not a runtime protocol.
+Limits: silence still equals dead (a live worker that does not renew is preempted). Heartbeats do not append events. Still single-node SQLite. Stop file is test harness, not a runtime protocol.
 
 ## Decision
 
-**Keep** `lease_until` + CAS reclaim in `try_lease_one_task`.
+**Keep** `lease_until` + CAS reclaim + `renew_lease` heartbeat.
 
-**Do not** treat TTL as a liveness protocol for production workers without measuring slow-but-alive preemption.
+**Do not** treat missing heartbeats as a distinguished crash type — only as silence.
 
 ## Reproduction
 
