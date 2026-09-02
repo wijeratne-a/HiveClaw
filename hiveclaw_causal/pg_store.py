@@ -1,122 +1,115 @@
-"""Append-only SQLite event log + current-state projection + reverse-dependency index."""
+"""Postgres-backed causal store. Same records/events/leases as SQLite Store.
+
+This is a networked *server*, not multi-master stigmergy. Clients share one
+Postgres over TCP. Causal semantics (statuses, edges, reverse_deps, TTL leases)
+are unchanged; SQL dialect and locking are the port.
+"""
 
 from __future__ import annotations
 
 import json
-import sqlite3
+import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
+from .store import (
+    _index_pair,
+    _json,
+    conditions_from_json,
+    conditions_to_json,
+    provenance_from_dict,
+    provenance_to_dict,
+)
 from .types import (
     CausalEvent,
     Edge,
     EdgeMode,
-    InvalidationCondition,
     InvalidationRule,
     ObjectKind,
-    Provenance,
     Record,
-    SourceRef,
     TaskStatus,
-    TrustClass,
 )
 
+_SCHEMA_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-def _json(obj: Any) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
-
-
-def provenance_to_dict(p: Provenance) -> dict[str, Any]:
-    return {
-        "producer": p.producer,
-        "timestamp": p.timestamp,
-        "trust": p.trust.value,
-        "sources": [
-            {"uri": s.uri, "version": s.version, "content_hash": s.content_hash}
-            for s in p.sources
-        ],
-    }
+try:
+    import psycopg  # type: ignore[import-not-found]
+    from psycopg.rows import dict_row  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - optional extra
+    psycopg = None  # type: ignore[assignment]
+    dict_row = None  # type: ignore[assignment]
 
 
-def provenance_from_dict(d: dict[str, Any]) -> Provenance:
-    sources = tuple(
-        SourceRef(
-            uri=str(s["uri"]),
-            version=s.get("version"),
-            content_hash=str(s.get("content_hash") or ""),
+def require_psycopg() -> None:
+    if psycopg is None:
+        raise RuntimeError(
+            "psycopg is required for PgStore. Install: python -m pip install 'psycopg[binary]'"
         )
-        for s in d.get("sources", [])
-    )
-    return Provenance(
-        producer=str(d["producer"]),
-        sources=sources,
-        timestamp=str(d["timestamp"]),
-        trust=TrustClass(d["trust"]),
-    )
 
 
-def conditions_to_json(conds: tuple[InvalidationCondition, ...]) -> str:
-    return _json(
-        [
-            {
-                "description": c.description,
-                "evidence_ids": list(c.evidence_ids),
-                "rule": c.rule.value,
-            }
-            for c in conds
-        ]
-    )
+def new_schema_name(prefix: str = "hc") -> str:
+    raw = f"{prefix}_{uuid.uuid4().hex[:10]}"
+    if not _SCHEMA_OK.fullmatch(raw):
+        raise ValueError(raw)
+    return raw
 
 
-def conditions_from_json(raw: str) -> tuple[InvalidationCondition, ...]:
-    data = json.loads(raw or "[]")
-    return tuple(
-        InvalidationCondition(
-            description=str(c["description"]),
-            evidence_ids=tuple(c.get("evidence_ids") or ()),
-            rule=InvalidationRule(c["rule"]),
-        )
-        for c in data
-    )
+def locator_json(dsn: str, schema: str) -> str:
+    return json.dumps({"dsn": dsn, "schema": schema}, separators=(",", ":"))
 
 
-def open_store(locator: str) -> Store:
-    """Open SQLite Store or Postgres PgStore from a path or JSON locator.
-
-    JSON locator: ``{"dsn": "postgresql://...", "schema": "hc_abc"}``.
-    """
-    if locator.startswith("{"):
-        spec = json.loads(locator)
-        from .pg_store import PgStore
-
-        return PgStore(str(spec["dsn"]), schema=str(spec["schema"]))  # type: ignore[return-value]
-    if locator.startswith("postgres"):
-        from .pg_store import PgStore
-
-        return PgStore(locator)  # type: ignore[return-value]
-    return Store(locator)
+def _check_schema(name: str) -> str:
+    if not _SCHEMA_OK.fullmatch(name):
+        raise ValueError(f"unsafe schema name: {name!r}")
+    return name
 
 
-class Store:
-    def __init__(self, db_path: Path | str) -> None:
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path), timeout=30.0)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=8000")
-        self._init_schema()
+class PgStore:
+    """Duck-types Store. `db_path` is a label for logs, not a file."""
+
+    def __init__(self, dsn: str, *, schema: str = "public") -> None:
+        require_psycopg()
+        assert psycopg is not None
+        assert dict_row is not None
+        self.dsn = dsn
+        self.schema = _check_schema(schema)
+        self.db_path = Path(f"pg:{self.schema}")
+        self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        self._ensure_schema()
+        if not self._schema_ready():
+            self._conn.execute(
+                "SELECT pg_advisory_lock(872341, hashtext(%s))", (self.schema,)
+            )
+            try:
+                if not self._schema_ready():
+                    self._init_schema()
+            finally:
+                self._conn.execute(
+                    "SELECT pg_advisory_unlock(872341, hashtext(%s))",
+                    (self.schema,),
+                )
 
     def close(self) -> None:
         self._conn.close()
 
+    def _ensure_schema(self) -> None:
+        self._conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
+        self._conn.execute(f'SET search_path TO "{self.schema}", public')
+
+    def _schema_ready(self) -> bool:
+        row = self._conn.execute(
+            "SELECT to_regclass(%s) AS rel",
+            (f"{self.schema}.objects",),
+        ).fetchone()
+        return row is not None and row["rel"] is not None
+
     def _init_schema(self) -> None:
-        cur = self._conn.cursor()
-        cur.executescript(
+        self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS events (
-              seq INTEGER PRIMARY KEY AUTOINCREMENT,
+              seq BIGSERIAL PRIMARY KEY,
               ts TEXT NOT NULL,
               event_type TEXT NOT NULL,
               object_id TEXT NOT NULL,
@@ -126,17 +119,41 @@ class Store:
               edge_id TEXT,
               rule TEXT,
               payload TEXT NOT NULL
-            );
-            CREATE TRIGGER IF NOT EXISTS events_append_only_no_update
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION hiveclaw_events_append_only()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+              RAISE EXCEPTION 'events is append-only: % is forbidden', TG_OP;
+            END;
+            $$
+            """
+        )
+        self._conn.execute("DROP TRIGGER IF EXISTS events_append_only_no_update ON events")
+        self._conn.execute(
+            """
+            CREATE TRIGGER events_append_only_no_update
             BEFORE UPDATE ON events
-            BEGIN
-              SELECT RAISE(ABORT, 'events is append-only: UPDATE is forbidden');
-            END;
-            CREATE TRIGGER IF NOT EXISTS events_append_only_no_delete
+            FOR EACH ROW
+            EXECUTE PROCEDURE hiveclaw_events_append_only()
+            """
+        )
+        self._conn.execute("DROP TRIGGER IF EXISTS events_append_only_no_delete ON events")
+        self._conn.execute(
+            """
+            CREATE TRIGGER events_append_only_no_delete
             BEFORE DELETE ON events
-            BEGIN
-              SELECT RAISE(ABORT, 'events is append-only: DELETE is forbidden');
-            END;
+            FOR EACH ROW
+            EXECUTE PROCEDURE hiveclaw_events_append_only()
+            """
+        )
+        self._conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS objects (
               id TEXT PRIMARY KEY,
               kind TEXT NOT NULL,
@@ -148,7 +165,11 @@ class Store:
               invalidation_conditions TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
-            );
+            )
+            """
+        )
+        self._conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS edges (
               id TEXT PRIMARY KEY,
               src TEXT NOT NULL,
@@ -156,20 +177,29 @@ class Store:
               mode TEXT NOT NULL,
               rule TEXT NOT NULL,
               declared_effect TEXT NOT NULL
-            );
+            )
+            """
+        )
+        self._conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS reverse_deps (
               target_id TEXT NOT NULL,
               dependent_id TEXT NOT NULL,
               edge_id TEXT NOT NULL,
               rule TEXT NOT NULL,
               PRIMARY KEY (target_id, dependent_id, edge_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_reverse_target ON reverse_deps(target_id);
-            CREATE INDEX IF NOT EXISTS idx_events_object ON events(object_id);
-            CREATE INDEX IF NOT EXISTS idx_objects_kind_status ON objects(kind, status);
+            )
             """
         )
-        self._conn.commit()
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reverse_target ON reverse_deps(target_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_object ON events(object_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_objects_kind_status ON objects(kind, status)"
+        )
 
     def append_event(
         self,
@@ -185,12 +215,12 @@ class Store:
         payload: dict[str, Any] | None = None,
         commit: bool = True,
     ) -> CausalEvent:
-        cur = self._conn.cursor()
-        cur.execute(
+        cur = self._conn.execute(
             """
             INSERT INTO events (ts, event_type, object_id, old_status, new_status,
                                 reason, edge_id, rule, payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING seq
             """,
             (
                 ts,
@@ -204,11 +234,10 @@ class Store:
                 _json(payload or {}),
             ),
         )
-        if commit:
-            self._conn.commit()
-        seq = cur.lastrowid
-        if seq is None:
-            raise RuntimeError("INSERT INTO events did not produce lastrowid")
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("INSERT INTO events did not return seq")
+        seq = int(row["seq"])
         return CausalEvent(
             seq=seq,
             ts=ts,
@@ -226,7 +255,7 @@ class Store:
         row = self._conn.execute(
             """
             SELECT 1 FROM events
-            WHERE object_id = ? AND edge_id = ? AND new_status = ?
+            WHERE object_id = %s AND edge_id = %s AND new_status = %s
             LIMIT 1
             """,
             (object_id, edge_id, new_status),
@@ -235,22 +264,21 @@ class Store:
 
     def put_object(self, rec: Record, *, ts: str, event_type: str, reason: str) -> Record:
         existing = self.get_or_none(rec.id)
-        cur = self._conn.cursor()
-        cur.execute(
+        self._conn.execute(
             """
             INSERT INTO objects (
               id, kind, status, provenance, payload, evidence_ids,
               source_snapshot, invalidation_conditions, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              kind=excluded.kind,
-              status=excluded.status,
-              provenance=excluded.provenance,
-              payload=excluded.payload,
-              evidence_ids=excluded.evidence_ids,
-              source_snapshot=excluded.source_snapshot,
-              invalidation_conditions=excluded.invalidation_conditions,
-              updated_at=excluded.updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+              kind=EXCLUDED.kind,
+              status=EXCLUDED.status,
+              provenance=EXCLUDED.provenance,
+              payload=EXCLUDED.payload,
+              evidence_ids=EXCLUDED.evidence_ids,
+              source_snapshot=EXCLUDED.source_snapshot,
+              invalidation_conditions=EXCLUDED.invalidation_conditions,
+              updated_at=EXCLUDED.updated_at
             """,
             (
                 rec.id,
@@ -284,7 +312,7 @@ class Store:
 
     def get_or_none(self, object_id: str) -> Record | None:
         row = self._conn.execute(
-            "SELECT * FROM objects WHERE id = ?", (object_id,)
+            "SELECT * FROM objects WHERE id = %s", (object_id,)
         ).fetchone()
         if row is None:
             return None
@@ -292,7 +320,7 @@ class Store:
 
     def objects_of(self, kind: ObjectKind) -> list[Record]:
         rows = self._conn.execute(
-            "SELECT * FROM objects WHERE kind = ? ORDER BY id", (kind.value,)
+            "SELECT * FROM objects WHERE kind = %s ORDER BY id", (kind.value,)
         ).fetchall()
         return [self._row_to_record(r) for r in rows]
 
@@ -321,8 +349,8 @@ class Store:
             rec.payload = {**rec.payload, **payload_update}
         self._conn.execute(
             """
-            UPDATE objects SET status = ?, updated_at = ?, payload = ?
-            WHERE id = ?
+            UPDATE objects SET status = %s, updated_at = %s, payload = %s
+            WHERE id = %s
             """,
             (new_status, ts, _json(rec.payload), object_id),
         )
@@ -340,14 +368,14 @@ class Store:
 
     def add_edge(self, edge: Edge) -> Edge:
         existing = self._conn.execute(
-            "SELECT id FROM edges WHERE id = ?", (edge.id,)
+            "SELECT id FROM edges WHERE id = %s", (edge.id,)
         ).fetchone()
         if existing is not None:
             return edge
         self._conn.execute(
             """
             INSERT INTO edges (id, src, dst, mode, rule, declared_effect)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
             (
                 edge.id,
@@ -361,20 +389,19 @@ class Store:
         target, dependent = _index_pair(edge)
         self._conn.execute(
             """
-            INSERT OR IGNORE INTO reverse_deps (target_id, dependent_id, edge_id, rule)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO reverse_deps (target_id, dependent_id, edge_id, rule)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
             """,
             (target, dependent, edge.id, edge.rule.value),
         )
-        self._conn.commit()
         return edge
 
     def reverse_lookup(self, target_id: str) -> list[tuple[str, str, str]]:
-        """Return (dependent_id, edge_id, rule) for objects that depend on target_id."""
         rows = self._conn.execute(
             """
             SELECT dependent_id, edge_id, rule FROM reverse_deps
-            WHERE target_id = ?
+            WHERE target_id = %s
             """,
             (target_id,),
         ).fetchall()
@@ -387,13 +414,12 @@ class Store:
         return self.dependent_of_kind(target_id, ObjectKind.CLAIM)
 
     def dependent_of_kind(self, target_id: str, kind: ObjectKind) -> list[Record]:
-        """Dependents of target_id with the given kind. Does not scan that kind's full table."""
         rows = self._conn.execute(
             """
             SELECT o.*
             FROM reverse_deps r
             JOIN objects o ON o.id = r.dependent_id
-            WHERE r.target_id = ? AND o.kind = ?
+            WHERE r.target_id = %s AND o.kind = %s
             ORDER BY o.id
             """,
             (target_id, kind.value),
@@ -403,18 +429,18 @@ class Store:
     def edges_to(self, dst: str, mode: EdgeMode | None = None) -> list[Edge]:
         if mode is None:
             rows = self._conn.execute(
-                "SELECT * FROM edges WHERE dst = ?", (dst,)
+                "SELECT * FROM edges WHERE dst = %s", (dst,)
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT * FROM edges WHERE dst = ? AND mode = ?",
+                "SELECT * FROM edges WHERE dst = %s AND mode = %s",
                 (dst, mode.value),
             ).fetchall()
         return [self._row_to_edge(r) for r in rows]
 
     def events_for(self, object_id: str) -> list[CausalEvent]:
         rows = self._conn.execute(
-            "SELECT * FROM events WHERE object_id = ? ORDER BY seq", (object_id,)
+            "SELECT * FROM events WHERE object_id = %s ORDER BY seq", (object_id,)
         ).fetchall()
         return [self._row_to_event(r) for r in rows]
 
@@ -429,28 +455,23 @@ class Store:
         *,
         lease_ttl_s: float = 30.0,
     ) -> Record | None:
-        """Atomically lease one pending task, or reclaim one expired lease.
-
-        Workers share only this SQLite file. `lease_until` is unix seconds so
-        sub-second TTLs work (object `ts` strings are 1s resolution).
-        """
         now = time.time()
         lease_until = now + lease_ttl_s
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
+        with self._conn.transaction():
             row = self._conn.execute(
                 """
                 SELECT * FROM objects
-                WHERE kind = ?
+                WHERE kind = %s
                   AND (
-                    status = ?
+                    status = %s
                     OR (
-                      status = ?
-                      AND json_extract(payload, '$.lease_until') IS NOT NULL
-                      AND CAST(json_extract(payload, '$.lease_until') AS REAL) < ?
+                      status = %s
+                      AND (payload::json->>'lease_until') IS NOT NULL
+                      AND (payload::json->>'lease_until')::float < %s
                     )
                   )
-                ORDER BY CASE status WHEN ? THEN 0 ELSE 1 END, id
+                ORDER BY CASE status WHEN %s THEN 0 ELSE 1 END, id
+                FOR UPDATE SKIP LOCKED
                 LIMIT 1
                 """,
                 (
@@ -462,7 +483,6 @@ class Store:
                 ),
             ).fetchone()
             if row is None:
-                self._conn.rollback()
                 return None
             rec = self._row_to_record(row)
             previous_owner = rec.payload.get("lease_owner")
@@ -479,8 +499,8 @@ class Store:
             )
             cur = self._conn.execute(
                 """
-                UPDATE objects SET status = ?, payload = ?, updated_at = ?
-                WHERE id = ? AND status = ?
+                UPDATE objects SET status = %s, payload = %s, updated_at = %s
+                WHERE id = %s AND status = %s
                 """,
                 (
                     TaskStatus.LEASED.value,
@@ -491,8 +511,7 @@ class Store:
                 ),
             )
             if cur.rowcount != 1:
-                self._conn.rollback()
-                return None
+                raise RuntimeError("lease CAS lost the row")
             event_type = "lease_reclaim" if reclaim else "lease_task"
             reason = (
                 f"reclaimed by {worker_id} from {previous_owner}"
@@ -513,14 +532,10 @@ class Store:
                 },
                 commit=False,
             )
-            self._conn.commit()
             rec.status = TaskStatus.LEASED.value
             rec.payload = payload
             rec.updated_at = ts
             return rec
-        except Exception:
-            self._conn.rollback()
-            raise
 
     def renew_lease(
         self,
@@ -530,42 +545,32 @@ class Store:
         *,
         lease_ttl_s: float = 30.0,
     ) -> Record:
-        """Extend lease_until for the current owner. No-op event (heartbeat is frequent)."""
         now = time.time()
         lease_until = now + lease_ttl_s
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
+        with self._conn.transaction():
             rec = self.get(task_id)
             if rec.kind != ObjectKind.TASK:
-                self._conn.rollback()
                 raise ValueError(f"{task_id} is not a task")
             if rec.status != TaskStatus.LEASED.value:
-                self._conn.rollback()
                 raise ValueError(f"{task_id} status {rec.status} is not leased")
             if rec.payload.get("lease_owner") != worker_id:
-                self._conn.rollback()
                 raise ValueError(
                     f"{task_id} owned by {rec.payload.get('lease_owner')} not {worker_id}"
                 )
             payload = {**rec.payload, "lease_until": lease_until}
             cur = self._conn.execute(
                 """
-                UPDATE objects SET payload = ?, updated_at = ?
-                WHERE id = ? AND status = ?
-                  AND json_extract(payload, '$.lease_owner') = ?
+                UPDATE objects SET payload = %s, updated_at = %s
+                WHERE id = %s AND status = %s
+                  AND payload::json->>'lease_owner' = %s
                 """,
                 (_json(payload), ts, task_id, TaskStatus.LEASED.value, worker_id),
             )
             if cur.rowcount != 1:
-                self._conn.rollback()
                 raise RuntimeError(f"lost lease on {task_id} during renew")
-            self._conn.commit()
             rec.payload = payload
             rec.updated_at = ts
             return rec
-        except Exception:
-            self._conn.rollback()
-            raise
 
     def complete_task(self, task_id: str, worker_id: str, ts: str) -> Record:
         rec = self.get(task_id)
@@ -578,8 +583,8 @@ class Store:
         payload = {**rec.payload, "completed_by": worker_id}
         cur = self._conn.execute(
             """
-            UPDATE objects SET status = ?, payload = ?, updated_at = ?
-            WHERE id = ? AND status = ?
+            UPDATE objects SET status = %s, payload = %s, updated_at = %s
+            WHERE id = %s AND status = %s
             """,
             (
                 TaskStatus.DONE.value,
@@ -605,7 +610,7 @@ class Store:
         rec.updated_at = ts
         return rec
 
-    def _row_to_record(self, row: sqlite3.Row) -> Record:
+    def _row_to_record(self, row: dict[str, Any]) -> Record:
         return Record(
             id=str(row["id"]),
             kind=ObjectKind(row["kind"]),
@@ -619,7 +624,7 @@ class Store:
             updated_at=str(row["updated_at"]),
         )
 
-    def _row_to_edge(self, row: sqlite3.Row) -> Edge:
+    def _row_to_edge(self, row: dict[str, Any]) -> Edge:
         return Edge(
             id=str(row["id"]),
             src=str(row["src"]),
@@ -629,7 +634,7 @@ class Store:
             declared_effect=str(row["declared_effect"]),
         )
 
-    def _row_to_event(self, row: sqlite3.Row) -> CausalEvent:
+    def _row_to_event(self, row: dict[str, Any]) -> CausalEvent:
         return CausalEvent(
             seq=int(row["seq"]),
             ts=str(row["ts"]),
@@ -644,12 +649,5 @@ class Store:
         )
 
 
-def _index_pair(edge: Edge) -> tuple[str, str]:
-    """(target, dependent): when target changes, dependent is re-evaluated."""
-    if edge.mode in (EdgeMode.DEPENDS_ON,):
-        return edge.dst, edge.src
-    if edge.mode in (EdgeMode.JUSTIFIES, EdgeMode.SUPPORTS, EdgeMode.PRODUCED_FROM):
-        return edge.src, edge.dst
-    if edge.mode in (EdgeMode.CONTRADICTS, EdgeMode.SUPERSEDES):
-        return edge.src, edge.dst
-    return edge.dst, edge.src
+# Fix _row_to_edge - InvalidationRule import
+# (patched below if needed)

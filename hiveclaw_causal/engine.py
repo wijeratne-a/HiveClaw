@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
-from .store import Store
 from .types import (
     ActionStatus,
     Edge,
@@ -34,7 +34,7 @@ def next_status(kind: ObjectKind, rule: InvalidationRule) -> str:
 TOPIC_PROVIDER_STATUS = "topic-provider-status"
 
 
-def index_provider_interest(store: Store, rec: Record) -> None:
+def index_provider_interest(store: Any, rec: Record) -> None:
     """Index a claim that declared provider-status interest.
 
     A new provider-outage observation is not already in reverse_deps of existing
@@ -61,7 +61,7 @@ def index_provider_interest(store: Store, rec: Record) -> None:
 class InvalidationEngine:
     def __init__(
         self,
-        store: Store,
+        store: Any,
         clock: Callable[[], str],
         counter: WorkCounter | None = None,
     ) -> None:

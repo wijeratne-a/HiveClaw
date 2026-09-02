@@ -296,6 +296,14 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 
 ## Session log
 
+### 2026-09-01 — Session 7 first networked backend (Postgres over TCP)
+
+- Scope named before code: one Postgres server over TCP, not multi-master stigmergy.
+- `PgStore` + `TcpProxy`. exp-004-multi-host: eval_steps still flat (tasks 6/7/8/8 vs naive 19/108/509/2009; claims 6 vs 19/519/2019). 92.0% unchanged. Wall-clock gap shrinks/jitters vs SQLite.
+- Leases: 5×3×8, SIGKILL, slow-alive, TCP-drop reclaim (process alive), stall>TTL false-reclaim.
+- Risk 1 restated: shared-nothing stigmergy still open. Not “single SQLite file” anymore.
+- `make test-causal` 31 OK + 8 skipped. Networked 8/8 with DSN. Demo WIP left unstaged.
+
 ### 2026-09-02 — Session 6 commit, claim topic index, lease heartbeat
 
 - Session 5 four commits pushed; CI https://github.com/wijeratne-a/HiveClaw/actions/runs/33575886839 success on `9c64bd9`.
@@ -380,3 +388,4 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 - Scaled benchmark: `docs/research/experiments/exp-002-scale-targeted-vs-naive.md`
 - Concurrent leases: `docs/research/experiments/exp-003-concurrent-leases.md`
 - Lease crash/churn: `docs/research/experiments/exp-004-lease-expiry-and-churn.md`
+- Networked backend: `docs/research/experiments/exp-004-multi-host.md`

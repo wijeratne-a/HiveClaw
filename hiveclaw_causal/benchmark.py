@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 from .fixture import build_rewind_fixture
 from .rewind import ACTION_ROLLBACK, TASK_FOLLOWUP, RewindRuntime
@@ -25,11 +26,11 @@ def measure_repair(
     extra_unrelated: int = 0,
     extra_related_claims: int = 0,
     extra_unrelated_claims: int = 0,
+    store: Any | None = None,
 ) -> tuple[RewindRuntime, WorkMetrics]:
     if mode not in ("targeted", "naive"):
         raise ValueError(mode)
-    path = Path(db_path)
-    rt = RewindRuntime.create(path)
+    rt = RewindRuntime.create(db_path, store=store)
     fixture = build_rewind_fixture(
         seed=seed,
         extra_unrelated=extra_unrelated,

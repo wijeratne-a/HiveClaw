@@ -74,7 +74,7 @@ _KIND_URI = {
 
 
 class RewindRuntime:
-    def __init__(self, db_path: Path, store: Store) -> None:
+    def __init__(self, db_path: Path, store: Any) -> None:
         self.db_path = Path(db_path)
         self.store = store
         self.fixture: RewindFixture | None = None
@@ -84,7 +84,9 @@ class RewindRuntime:
         self.engine = InvalidationEngine(store, clock=self._now, counter=self.work)
 
     @classmethod
-    def create(cls, db_path: Path | str) -> RewindRuntime:
+    def create(cls, db_path: Path | str, store: Any | None = None) -> RewindRuntime:
+        if store is not None:
+            return cls(Path(str(db_path)), store)
         path = Path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         return cls(path, Store(path))

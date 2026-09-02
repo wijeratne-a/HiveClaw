@@ -1,0 +1,2 @@
+# Optional extra for Session 7 networked Rewind tests (not required for make test-causal).
+psycopg[binary]>=3.1

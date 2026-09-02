@@ -4,11 +4,11 @@ Distinguish **proven** (command ran) vs **implemented but not separately measure
 
 ---
 
-## State of evidence (Session 6, 2026-09-02)
+## State of evidence (Session 7, 2026-09-01)
 
-HEAD of Session 5 commits: `9c64bd9` on `origin/main`. CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33575886839 (`test-causal` success, `make test-causal` step green, 0 annotations). Interpreter: `.venv/bin/python` 3.11.1. Causal suite after Session 6 code: `make test-causal` → **31 tests OK**, mypy 22 files.
+HEAD before this session: `0a557b2` (Session 6) on `origin/main`. Interpreter: `.venv/bin/python` 3.11.1. Causal suite after Session 7: `make test-causal` → **31 tests OK + 8 Postgres skipped** (no DSN), mypy 25 files. Networked suite with DSN: **8/8 OK**.
 
-This is not a closeness-to-revolution score. It is what the tests and experiment logs actually show. Flat eval_steps is a **bounded-cost coordination property on this fixture, single-host only**.
+This is not a closeness-to-revolution score. Flat eval_steps is a **bounded-cost coordination property on this fixture**. Session 7 showed it still holds against **one Postgres over TCP**, not only one SQLite file. It is still **not** a no-central-server stigmergy result.
 
 ### Original four guarantees
 
@@ -25,22 +25,23 @@ This is not a closeness-to-revolution score. It is what the tests and experiment
 |-------|--------|------------------------|
 | Targeted repair reaches the **same conclusion** as naive full re-eval | **Evidenced** | 92.0% `outage_explains_pct` (seed 42), rollback blocked, follow-up present at task-N=12/100/500/2000 and claim-C=0/500/2000. exp-001, exp-002. |
 | Targeted **touches fewer objects** | **Evidenced** | Task-N=2000: 11 vs 2007. Claim-C=2000: 9 vs 2019. |
-| Targeted uses **fewer eval_steps** (tasks) | **Evidenced** | Session 5: 6 → 8 → 10 → 10 vs naive 19 / 109 / 511 / 2011. |
-| Targeted uses **fewer eval_steps** (unrelated claims) | **Evidenced (Session 6)** | Topic index: eval **6** vs naive 19 / 519 / 2019 at C=0/500/2000. Not via the observation cone (see below). |
+| Targeted uses **fewer eval_steps** (tasks) | **Evidenced** | SQLite Session 5: 6 → 8 → 10 → 10 vs naive 19 / 109 / 511 / 2011. Postgres Session 7: 6 → 7 → 8 → 8 vs 19 / 108 / 509 / 2009. |
+| Targeted uses **fewer eval_steps** (unrelated claims) | **Evidenced (Session 6–7)** | Topic index: eval **6** vs naive 19 / 519 / 2019 at C=0/500/2000 on **both** SQLite and Postgres. |
 | Eval-step **gap grows faster than linearly** | **Not supported** | Difference ≈ N (linear). |
-| **Wall-clock** targeted is faster | **Evidenced only at sufficient N, small absolute gap** | Typical C=2000: ~3 ms vs ~30–35 ms. One 53 ms targeted outlier recorded. Tens of milliseconds. |
+| **Wall-clock** targeted is faster | **Evidenced only at sufficient N on SQLite; weak/noisy over TCP** | SQLite C=2000: ~3 ms vs ~30–35 ms. Postgres N=500: ~33–38 ms **both** paths. Postgres N=2000: ~30 ms vs ~73–78 ms. |
 | Inspecting unrelated **tasks** is required by the index | **Falsified** | Task→target `depends_on`; `dependent_tasks` on the cone. |
 | Inspecting unrelated **claims** is required because they cannot join reverse_deps | **Falsified as O(N) scan; scoped as topic-index** | A new provider observation is **not** a reverse-dep parent of existing claims until overlap fires. Claims are indexed on `topic-provider-status` at create time. Same `reverse_deps` table, different key than the task cone. |
-| Multi-process leases, no worker messaging | **Evidenced, single host** | exp-003: 5×3×8, **0 double-lease**. |
-| Dead / silent worker’s lease is **reclaimed** | **Evidenced** | exp-004 SIGKILL: survivor completes; `reclaimed_from=crasher`. |
-| Slow-alive worker that **renews** is **not** reclaimed | **Evidenced (Session 6)** | 0.7 s work, 0.2 s TTL, renew every 0.05 s; poacher `None`; `completed_by=slow`; no `lease_reclaim`. |
-| Drain under **continuous insert** | **Evidenced, small N** | 24 tasks / 3 workers. |
-| Multi-host / IOSurface stigmergy is the same primitive | **Untested** | One SQLite file. Slab `claim_task` ≠ this queue. |
-| LLM-free outage % | **Evidenced** | seed 42 → **92.0**. |
+| Multi-process leases, no worker messaging | **Evidenced** | SQLite exp-003: 5×3×8, **0 double-lease**. Postgres Session 7: same, 0 doubles. |
+| Dead / silent worker’s lease is **reclaimed** | **Evidenced** | SQLite SIGKILL. Postgres SIGKILL and **TCP drop with process still alive**. |
+| Slow-alive worker that **renews** is **not** reclaimed | **Evidenced (Session 6–7)** | SQLite and Postgres: 0.7 s work, 0.2 s TTL, renew every 0.05 s; poacher `None`. |
+| Heartbeat delayed longer than TTL (stall, not death) | **Evidenced (Session 7)** | Proxy stall 0.45 s, TTL 0.2 s: poacher reclaims the live worker. Silence = reclaim. |
+| Drain under **continuous insert** | **Evidenced, small N, SQLite only** | 24 tasks / 3 workers. Not re-run on Postgres this session. |
+| Multi-host stigmergy / no central store | **Untested** | Session 7 is one Postgres server over TCP. Slab `claim_task` ≠ this queue. Two Rewind stores with no shared DB: not built. |
+| LLM-free outage % | **Evidenced** | seed 42 → **92.0** (SQLite and Postgres). |
 
 ### Smaller in practice than the original efficiency story
 
-**Eval-step scaling (named):** Session 4–5 task-scan cap is gone. Session 6 claim-scan cap is gone **for provider-interest overlap**, via a topic key, not the observation cone. Wall-clock remains milliseconds. Naive is still O(N) by design.
+**Eval-step scaling (named):** Session 4–5 task-scan cap is gone. Session 6 claim-scan cap is gone **for provider-interest overlap**, via a topic key, not the observation cone. Session 7: the same pattern holds on Postgres over TCP; exact task-side integers drifted by 1–2 vs SQLite. Wall-clock on a local file remains milliseconds; over Docker TCP the gap is smaller and noisier. Naive is still O(N) by design.
 
 ### Assumed but untested
 
@@ -48,15 +49,41 @@ This is not a closeness-to-revolution score. It is what the tests and experiment
 - Multi-writer correctness beyond these process tests (not a model checker).
 - Ironclad burn-in, `integration_test.py --stress`, Phase 7 goldens.
 - Any coupling of this causal graph to the Metal/IOSurface slab.
-- A live worker that is slow **and does not renew** is treated as silent (by design, not separately tested beyond TTL reclaim).
+- Continuous-insert drain on Postgres (SQLite only).
+- Two independent Rewind stores merging without a shared server.
 
 ### Largest remaining risks (severity order)
 
-1. **Open — single-host only.** No multi-host stigmergy is tested. Every eval-step, wall-clock, and lease number is one machine and one SQLite file. The IOSurface slab is a different object. This is the largest remaining risk to the core thesis (coordination primitive vs local demo).
-2. **Closed this session — claim-side O(N) overlap scan.** Unrelated claims at C=500 and C=2000 keep targeted eval_steps at **6** vs naive 519 / 2019. Limit named: lookup is `topic-provider-status`, not `dependent_claims(obs.id)`.
-3. **Closed this session — TTL reclaim vs slow-alive.** Heartbeat `renew_lease` keeps a 0.7 s worker under a 0.2 s TTL; SIGKILL without renew is still reclaimed. Remaining sub-limit: silence (no heartbeat) is indistinguishable from death.
+1. **Open — no shared-nothing / multi-master stigmergy (still the largest thesis risk).** Session 7 closed “this only works as a local SQLite file.” It did **not** close “coordination without a central manager.” Everything networked here talks to **one Postgres**. Partitions between two causal stores, replica lag, CRDT/merge, and the IOSurface slab remain untested. A green TCP run is adjacent to the moat claim, not proof of it.
+2. **Closed Session 6 — claim-side O(N) overlap scan.** Unrelated claims at C=500 and C=2000 keep targeted eval_steps at **6** vs naive 519 / 2019 (SQLite and Postgres). Limit named: lookup is `topic-provider-status`, not `dependent_claims(obs.id)`.
+3. **Closed Session 6–7 — TTL reclaim vs slow-alive, including network failure.** Heartbeat keeps a 0.7 s worker under a 0.2 s TTL on SQLite and Postgres. SIGKILL without renew is reclaimed. TCP drop with the process still alive is reclaimed after TTL. **Evidenced limit:** a stall longer than TTL false-reclaims a live worker (delayed heartbeat = silence).
 
-If the claim is “this replaces a manager / bus / slab for agents,” that is **not evidenced** (risk 1). If the claim is “Rewind skips unrelated tasks and unrelated non-provider claims on this fixture, blocks rollback for documented reasons, and a local CAS queue can drain, reclaim silence, and respect heartbeats,” that **is** evidenced.
+If the claim is “this replaces a manager / bus / slab for agents,” that is **not evidenced** (risk 1). If the claim is “Rewind skips unrelated tasks and unrelated non-provider claims on this fixture, blocks rollback for documented reasons, and a CAS queue can drain over a TCP database, reclaim silence and dropped connections, and respect heartbeats until the path stalls past TTL,” that **is** evidenced.
+
+---
+
+## Session 7 — 2026-09-01 (Postgres over TCP)
+
+### Part 1 — scope before code
+
+Named in `docs/research/experiments/exp-004-multi-host.md` before `PgStore` existed: **(a)** one Postgres over TCP, not true multi-host replication, not two threads on one SQLite file.
+
+### Part 2 — what ran
+
+Docker `postgres:16` on port 55432. `PgStore` + `TcpProxy`. Scaling table and 8/8 networked tests in that experiment file. Local `make test-causal` without DSN: 31 OK + 8 skipped, mypy 25 files.
+
+### Part 3 — verdict
+
+Bounded eval_steps and lease safety **held** on a real TCP hop to a single server. Wall-clock advantage **degraded**. Central-manager-free stigmergy **still open**.
+
+### Part 4 — this risk ranking
+
+Ordered 1–3 as above. Risk 1 is restated, not closed.
+
+### Local suite after Session 7
+
+`make test-causal` → **31 tests OK**, 8 skipped, mypy 25 files.  
+`HIVECLAW_PG_DSN=... python -m unittest tests.test_hiveclaw_causal_pg -v` → **8/8 OK**.
 
 ---
 
