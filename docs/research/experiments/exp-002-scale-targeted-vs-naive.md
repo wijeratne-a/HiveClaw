@@ -90,3 +90,12 @@ python -m hiveclaw_causal.benchmark --extra-unrelated 662 --extra-related 2
 python -m hiveclaw_causal.benchmark --extra-unrelated-claims 500
 python -m hiveclaw_causal.benchmark --extra-unrelated-claims 2000
 ```
+
+## Reconciliation note (2026-09-01)
+
+Re-run on HEAD `ff4b146e65f10407d3b3552ce3a9a2328faf1afa`:
+
+- N=500 (`--extra-unrelated 162 --extra-related 2`): targeted/naive eval_steps **8 / 509** (Session 5 table above: **10 / 511**). Touched 11 / 507, objects_before 500, support_pct 92.0, rollback blocked — same as the Session 5 row except eval_steps.
+- C=500 (`--extra-unrelated-claims 500`): eval **6 / 519**, matching the Session 6 table.
+
+Original Session 5 integers reflect the codebase after cone-indexed tasks (`f9874a6`, recorded in `7eba213`) **prior to** the provider-topic claim index (`4a47330`). That later change removed remaining claim-table inspections on the task-scale fixture as well; the table above was not rewritten. Structural conclusion (targeted eval_steps bounded vs naive linear in N) is unchanged.

@@ -69,3 +69,9 @@ source .venv/bin/activate
 python -m hiveclaw_causal.benchmark
 python tests/test_hiveclaw_causal_benchmark.py
 ```
+
+## Reconciliation note (2026-09-01)
+
+Re-run on HEAD `ff4b146e65f10407d3b3552ce3a9a2328faf1afa` (`python -m hiveclaw_causal.benchmark`, seed 42, twice) produced targeted **eval_steps = 6** (naive still 19). Touched 9 vs 19, untouched 10 vs 0, support_pct 92.0, rollback blocked, follow-up present — unchanged. Wall-clock was ~2.8–2.9 ms targeted vs ~3.2–3.3 ms naive (not the ~7 ms in the table above).
+
+Original numbers in this file reflect the codebase at time of writing (HEAD after `4fe3c6d` / Session 3, **prior to** cone-indexed tasks `f9874a6` and the topic-key claim index `4a47330`). Session 5 already recorded N=12 targeted eval_steps dropping 7 → 6; this file’s table was not backfilled. Structural conclusion (bounded vs linear at this N is a skip-list, not a latency win) is unchanged.

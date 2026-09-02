@@ -4,9 +4,11 @@ Distinguish **proven** (command ran) vs **implemented but not separately measure
 
 ---
 
-## State of evidence (Session 8, 2026-09-01)
+## State of evidence (Session 10, 2026-09-01)
 
-HEAD: `f4496ee` on `origin/main`. CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33582036614 (`test-causal` success). Interpreter: `.venv/bin/python` 3.11.1.
+HEAD: `ff4b146e65f10407d3b3552ce3a9a2328faf1afa` on `origin/main` (Session 9 operator tooling). CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33596227872 (`test-causal` success on that SHA). Interpreter: `.venv/bin/python` 3.11.1.
+
+Session 10 is documentation reconciliation after `docs/research/independent-audit-2026-09-01.md`. It does not change causal math. Historical session SHAs/run IDs below are left as they were for those sessions (verified 2026-09-01: they still resolve).
 
 **Evidenced claim (precise):** Rewind is a **centralized causal store** (one SQLite file or one Postgres server) with **safe concurrent multi-process and networked clients**: bounded-cost invalidation on this fixture, append-only events, TTL/heartbeat leases, and a hard TTL ceiling so a client cannot strand work with an infinite/hour-long lease. It is **not** “no central manager” and **not** decentralized stigmergy.
 
@@ -38,6 +40,7 @@ This is not a closeness-to-revolution score.
 | Slow-alive worker that **renews** is **not** reclaimed | **Evidenced (Session 6–7)** | SQLite and Postgres: 0.7 s work, 0.2 s TTL, renew every 0.05 s; poacher `None`. |
 | Heartbeat delayed longer than TTL (stall, not death) | **Evidenced (Session 7)** | Proxy stall > TTL: poacher reclaims the live worker. Silence = reclaim. |
 | Unbounded / huge client TTL can strand after TCP drop | **Closed (Session 8)** | `LEASE_TTL_CEILING_S = 30` in Python + `lease_config` + INSERT/UPDATE trigger. Client 3600s or `inf` is clamped. SQLite silence + Postgres TCP-drop tests reclaim within a 1s store max. |
+| Event-log integrity / restore drill / lease dashboard | **Evidenced (Session 9)** | `verify-store` (read-only), SQLite backup API + restore to an isolated file, `store-status`, schema migrate `--confirm`, 8×5×3 contention still **0 doubles**. Failed lease attempts, reclaim latency, and process health are **not** persisted (`recorded: false`). |
 | Drain under **continuous insert** | **Evidenced, small N, SQLite only** | 24 tasks / 3 workers. Not re-run on Postgres. |
 | Multi-host stigmergy / no central store | **Out of scope** | Not “untested, try next session.” The data model **requires** one authoritative store. See `docs/research/decentralization-assessment.md`. |
 | LLM-free outage % | **Evidenced** | seed 42 → **92.0** (SQLite and Postgres). |
@@ -60,8 +63,60 @@ This is not a closeness-to-revolution score.
 1. **Out of scope — decentralized / “no central manager” stigmergy.** Session 8’s answer is **no**: the event log, reverse-deps index, and lease CAS require a single authoritative store. SQLite and Postgres are the same architecture. This is no longer listed as the next experiment; it is a different product. Memo: `docs/research/decentralization-assessment.md`.
 2. **Closed Session 6 — claim-side O(N) overlap scan.** Unrelated claims at C=500 and C=2000 keep targeted eval_steps at **6** vs naive 519 / 2019. Limit: `topic-provider-status`, not `dependent_claims(obs.id)`.
 3. **Closed Session 8 — TTL-strand / unbounded lease.** Absolute ceiling 30s (schema CHECK + trigger + Python clamp). Store may set a stricter max (tests use 1s). Slow-alive + renew still holds. Remaining operational limit: silence (no heartbeat, including stalled network) is reclaimed after the **clamped** TTL, not after process death.
+4. **Closed Session 9 as product ops, not as HA.** One store still means backup/restore *is* disaster recovery. Verifier + drill exist; there is no standby replica. Threat model is local developer / trusted internal, not multi-tenant.
 
-If the claim is “this replaces a manager / bus / slab for agents,” that is **not evidenced and not in scope** for this runtime. If the claim is “Rewind is a centralized causal store: it skips unrelated tasks and non-provider claims on this fixture, blocks rollback for documented reasons, and a CAS queue can drain over a file or a TCP database, reclaim silence and dropped connections, respect heartbeats, and refuse an indefinite TTL,” that **is** evidenced.
+If the claim is “this replaces a manager / bus / slab for agents,” that is **not evidenced and not in scope** for this runtime. If the claim is “Rewind is a centralized causal store: it skips unrelated tasks and non-provider claims on this fixture, blocks rollback for documented reasons, and a CAS queue can drain over a file or a TCP database, reclaim silence and dropped connections, respect heartbeats, and refuse an indefinite TTL,” that **is** evidenced. Session 9 adds: you can **verify**, **back up**, **inspect leases**, and **migrate** that one store without changing the coordination model.
+
+### Demonstration UI (explicitly descoped)
+
+The original product brief asked for a visual Rewind demo a non-technical reviewer could follow in under five minutes: a living work map, a rewind timeline, and a graphical “why?” inspector.
+
+**None of that has been built in any session.** There is no Rewind HTML/TSX UI. What exists is CLI: `python -m hiveclaw_causal` / `demo_rewind.py`, `inspect.py`, `benchmark.py`, and Session 9 `store-status` / `verify-store`. HiveClaw’s SAE TUI (`hiveclaw-dashboard`) is a different product (slab latents), not this causal graph.
+
+**Decision (Session 10):** descoped for now. A GUI sprint is not the next causal-runtime milestone. Proof remains CLI + tests. Revisit only if a named reviewer cannot use the CLI.
+
+Discovery docs: `docs/research/architecture-map.md` and `docs/research/gap-analysis.md` (Session 10; the original pre-code pair was never written).
+
+---
+
+## Session 10 — 2026-09-01 (reconcile independent audit)
+
+Independent audit: `docs/research/independent-audit-2026-09-01.md`. Causal core matched; paperwork and uncommitted Session 9 did not.
+
+| Item | Action |
+|------|--------|
+| Session 9 on `origin/main` | Commit `ff4b146`. CI https://github.com/wijeratne-a/HiveClaw/actions/runs/33596227872 success. |
+| Checkpoint HEAD / run ID | Banner updated from stale `f4496ee` / 33582036614 (that pair remains valid **for Session 8 docs** `f4496ee`). |
+| exp-001 / exp-002 drift | Addenda only; original tables kept. |
+| architecture-map / gap-analysis | Written now as current-state docs (they had never existed). |
+| Rewind GUI | Descoped; section above. |
+
+Historical run IDs left in place (checked against GitHub API 2026-09-01): 33582036614 (`f4496ee`), 33578062030 (`68d1f59`), 33575886839 (`9c64bd9`), 33478599893 (`368b330`). Session 8 tip-after-CI-record `c273453` is https://github.com/wijeratne-a/HiveClaw/actions/runs/33582094903.
+
+---
+
+## Session 9 — 2026-09-01 (centralized-store operational hardening)
+
+Goal: make the one-authoritative-store architecture operable. Not a new backend, not CRDTs.
+
+| Item | What shipped |
+|------|----------------|
+| **B verifier** | `python -m hiveclaw_causal verify-store --db …` read-only JSON + summary. Seq monotonic; gaps info-only; projection replay; reverse-deps; `has_applied`; illegal lease/complete transitions; append-only + TTL triggers; schema version. No event hash column (`event_checksums.recorded = false`). |
+| **C backup/restore** | SQLite `Connection.backup` + `PRAGMA integrity_check`. Restore `--confirm` to an isolated path, then verify. Drill: fixture → backup while writer open → restore → lease + provider invalidation still work. Postgres: document `pg_dump`; in-process schema copy when DSN set. |
+| **A store-status** | `store-status --db …` task counts, active leases (owner, acquired, expiry, remaining TTL, renewal/reclaim counts, clamp), near-expiry, clamped event count, reclaim event count, TTL vs ceiling. Honest gaps: failed attempts, reclaim latency, process health. |
+| **D migrate** | Schema version 2 stamped. `migrate --to-latest --confirm`. No automatic downgrade. SQLite flock + Postgres advisory lock 872343. Post-migrate verifier. |
+| **E contract** | `docs/research/deployment-contract.md` — SQLite vs Postgres, NFS warning, one DSN, clocks, retries vs CAS. |
+| **F stress** | Extra 8 workers × 5 tasks × 3 trials, **0 doubles**. Duplicate `complete_task` retry does not append a second event. SIGKILL/TCP-drop remain Session 5–8 tests (not loosened). |
+| **G threat model** | `docs/research/threat-model.md` — local developer / trusted internal. Not multi-tenant. |
+
+CLI entry: `python -m hiveclaw_causal <command>` (`hiveclaw-causal` in prose). Bare `python -m hiveclaw_causal` still runs the demo.
+
+DR write-up: `docs/research/backup-restore.md`.
+
+### Local suite after Session 9
+
+`make test-causal` → **44 tests OK**, 10 Postgres skipped, mypy **33 files**.  
+`HIVECLAW_PG_DSN=... python -m unittest tests.test_hiveclaw_causal_pg -v` → **10/10 OK** (includes in-process schema copy drill).
 
 ---
 

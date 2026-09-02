@@ -237,6 +237,8 @@ make doctor
 make daemon-status                               # program must be this checkout's target/release/pheromoned
 hiveclaw-server --host 127.0.0.1 --port 8080
 python -m hiveclaw_causal.benchmark              # targeted vs naive full rerun
+python -m hiveclaw_causal store-status --db output/rewind.sqlite
+python -m hiveclaw_causal verify-store --db output/rewind.sqlite
 ```
 
 Daemon bootstrap from **Cursor/VS Code terminals often fails with launchctl EIO 5**. Use **Terminal.app**. `make daemon-load` treats EIO as OK if the job is already running with this binary.
@@ -295,6 +297,19 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 ---
 
 ## Session log
+
+### 2026-09-01 — Session 10 reconcile independent audit
+
+- Session 9 operator tooling pushed: `ff4b146`. CI https://github.com/wijeratne-a/HiveClaw/actions/runs/33596227872 success.
+- Checkpoint banner SHA/run ID updated. exp-001/002 addenda (tables not overwritten). architecture-map + gap-analysis written as current state. Rewind GUI descoped.
+- Demo WIP left unstaged.
+
+### 2026-09-01 — Session 9 centralized-store operational hardening
+
+- Verifier, SQLite backup/restore drill, read-only `store-status`, schema migrate `--confirm`, deployment contract, threat model (local / trusted internal). No third backend, no CRDT.
+- `complete_task` retry by the same worker is idempotent. Contention 8×5×3 still 0 doubles. Failed attempts / reclaim latency / process health not invented.
+- `make test-causal` 44 OK + 10 skipped, mypy 33 files. Postgres with DSN: 10/10 including logical backup drill.
+- Demo WIP left unstaged.
 
 ### 2026-09-01 — Session 8 TTL ceiling + decentralization scope-lock
 
@@ -397,3 +412,9 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 - Lease crash/churn: `docs/research/experiments/exp-004-lease-expiry-and-churn.md`
 - Networked backend: `docs/research/experiments/exp-004-multi-host.md`
 - Decentralization (out of scope): `docs/research/decentralization-assessment.md`
+- Deployment contract: `docs/research/deployment-contract.md`
+- Backup/restore: `docs/research/backup-restore.md`
+- Threat model: `docs/research/threat-model.md`
+- Architecture map (current): `docs/research/architecture-map.md`
+- Gap analysis: `docs/research/gap-analysis.md`
+- Independent audit (2026-09-01): `docs/research/independent-audit-2026-09-01.md`
