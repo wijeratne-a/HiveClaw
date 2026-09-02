@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .engine import InvalidationEngine
+from .engine import InvalidationEngine, index_provider_interest
 from .fixture import RewindFixture, build_rewind_fixture
 from .inspect import explain
 from .policy import authorize
@@ -355,6 +355,7 @@ class RewindRuntime:
             event_type="propose_claim",
             reason="investigator: deploy just before timeouts; cache path changed",
         )
+        index_provider_interest(self.store, claim)
         for ev in (OBS_TIMEOUTS, OBS_DEPLOY):
             self.store.add_edge(
                 Edge(
@@ -518,6 +519,7 @@ class RewindRuntime:
             self.store.put_object(
                 rec, ts=ts, event_type="propose_claim", reason=f"scale related claim {i}"
             )
+            index_provider_interest(self.store, rec)
             self.store.add_edge(
                 Edge(
                     id=f"edge-depends-{cid}-{CLAIM_CACHE}",
@@ -528,6 +530,34 @@ class RewindRuntime:
                     declared_effect="challenge follow-on if cache claim is challenged",
                 )
             )
+        for i in range(fixture.extra_unrelated_claims):
+            ts = self._now()
+            cid = f"claim-unrel-{i:04d}"
+            snapshot = content_hash({"unrelated": i})
+            rec = Record(
+                id=cid,
+                kind=ObjectKind.CLAIM,
+                status=ObjectStatus.ACTIVE.value,
+                provenance=_prov(
+                    "investigator",
+                    f"fixture://claim/unrel/{i}",
+                    {"i": i},
+                    ts,
+                    TrustClass.INFERRED,
+                ),
+                payload={
+                    "hypothesis": f"unrelated capacity note {i}",
+                    "confidence": 0.3,
+                },
+                evidence_ids=(OBS_UNRELATED,),
+                source_snapshot=snapshot,
+                created_at=ts,
+                updated_at=ts,
+            )
+            self.store.put_object(
+                rec, ts=ts, event_type="propose_claim", reason=f"scale unrelated claim {i}"
+            )
+            index_provider_interest(self.store, rec)
 
     def _put_task(self, tid: str, *, ts: str, payload: dict[str, Any]) -> Record:
         rec = Record(
@@ -749,6 +779,7 @@ class RewindRuntime:
             reason="verifier: outage window covers computed share of failures",
         )
         self.work.touch(claim.id)
+        index_provider_interest(self.store, claim)
         residual_n = sum(
             1
             for f in self.fixture.failures
@@ -793,6 +824,7 @@ class RewindRuntime:
             reason="investigator: residual failures sit outside the outage window",
         )
         self.work.touch(residual.id)
+        index_provider_interest(self.store, residual)
 
 
 def run_rewind(db_path: Path | str, seed: int = 42) -> RewindRuntime:

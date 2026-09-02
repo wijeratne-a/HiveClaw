@@ -70,6 +70,19 @@ class TestTargetedVsNaive(unittest.TestCase):
         self.assertLess(scaled.eval_steps - base.eval_steps, 12)
         self.assertGreaterEqual(scaled.objects_untouched, 90)
 
+    def test_targeted_eval_steps_do_not_scan_unrelated_claims(self) -> None:
+        """Provider overlap must not inspect every extra unrelated claim."""
+        _rt0, base = measure_repair(self.dir / "c0.sqlite", mode="targeted", seed=42)
+        _rt1, scaled = measure_repair(
+            self.dir / "c1.sqlite",
+            mode="targeted",
+            seed=42,
+            extra_unrelated_claims=80,
+        )
+        self.assertEqual(scaled.objects_before, 92)
+        self.assertLess(scaled.eval_steps - base.eval_steps, 12)
+        self.assertGreaterEqual(scaled.objects_untouched, 80)
+
 
 if __name__ == "__main__":
     unittest.main()

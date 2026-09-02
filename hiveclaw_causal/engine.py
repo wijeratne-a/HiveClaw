@@ -31,6 +31,33 @@ def next_status(kind: ObjectKind, rule: InvalidationRule) -> str:
     return mapping[rule]
 
 
+TOPIC_PROVIDER_STATUS = "topic-provider-status"
+
+
+def index_provider_interest(store: Store, rec: Record) -> None:
+    """Index a claim that declared provider-status interest.
+
+    A new provider-outage observation is not already in reverse_deps of existing
+    claims (the contradict edge is created by this rule). Claims cannot be found
+    via the observation cone the way tasks are found via their target. They are
+    indexed on a stable topic key instead of scanning objects_of(CLAIM).
+    """
+    if rec.kind != ObjectKind.CLAIM:
+        return
+    if not _mentions_provider(rec):
+        return
+    store.add_edge(
+        Edge(
+            id=f"edge-depends-{rec.id}-{TOPIC_PROVIDER_STATUS}",
+            src=rec.id,
+            dst=TOPIC_PROVIDER_STATUS,
+            mode=EdgeMode.DEPENDS_ON,
+            rule=InvalidationRule.HARD_CHALLENGE,
+            declared_effect="claim is eligible for provider-outage window overlap",
+        )
+    )
+
+
 class InvalidationEngine:
     def __init__(
         self,
@@ -79,7 +106,7 @@ class InvalidationEngine:
             return fired
         obs_start = str(new_obs.payload.get("window_start", ""))
         obs_end = str(new_obs.payload.get("window_end", ""))
-        for claim in self.store.objects_of(ObjectKind.CLAIM):
+        for claim in self.store.dependent_claims(TOPIC_PROVIDER_STATUS):
             self.counter.inspect(claim.id)
             if claim.status not in (
                 ObjectStatus.PROPOSED.value,

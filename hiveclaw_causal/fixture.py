@@ -35,6 +35,7 @@ class RewindFixture:
     unrelated_note: dict[str, Any]
     extra_unrelated: int = 0
     extra_related_claims: int = 0
+    extra_unrelated_claims: int = 0
 
 
 def parse_ts(s: str) -> datetime:
@@ -80,8 +81,9 @@ def build_rewind_fixture(
     *,
     extra_unrelated: int = 0,
     extra_related_claims: int = 0,
+    extra_unrelated_claims: int = 0,
 ) -> RewindFixture:
-    if extra_unrelated < 0 or extra_related_claims < 0:
+    if extra_unrelated < 0 or extra_related_claims < 0 or extra_unrelated_claims < 0:
         raise ValueError("scale extras must be >= 0")
     rng = random.Random(seed)
     incident = TimeWindow(start="2026-08-30T14:00:00Z", end="2026-08-30T14:30:00Z")
@@ -155,4 +157,5 @@ def build_rewind_fixture(
         },
         extra_unrelated=extra_unrelated,
         extra_related_claims=extra_related_claims,
+        extra_unrelated_claims=extra_unrelated_claims,
     )

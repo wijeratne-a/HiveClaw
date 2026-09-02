@@ -364,7 +364,13 @@ class Store:
         return [(str(r["dependent_id"]), str(r["edge_id"]), str(r["rule"])) for r in rows]
 
     def dependent_tasks(self, target_id: str) -> list[Record]:
-        """Tasks indexed as depending on target_id. Does not scan the full task table."""
+        return self.dependent_of_kind(target_id, ObjectKind.TASK)
+
+    def dependent_claims(self, target_id: str) -> list[Record]:
+        return self.dependent_of_kind(target_id, ObjectKind.CLAIM)
+
+    def dependent_of_kind(self, target_id: str, kind: ObjectKind) -> list[Record]:
+        """Dependents of target_id with the given kind. Does not scan that kind's full table."""
         rows = self._conn.execute(
             """
             SELECT o.*
@@ -373,7 +379,7 @@ class Store:
             WHERE r.target_id = ? AND o.kind = ?
             ORDER BY o.id
             """,
-            (target_id, ObjectKind.TASK.value),
+            (target_id, kind.value),
         ).fetchall()
         return [self._row_to_record(r) for r in rows]
 

@@ -24,6 +24,7 @@ def measure_repair(
     seed: int = 42,
     extra_unrelated: int = 0,
     extra_related_claims: int = 0,
+    extra_unrelated_claims: int = 0,
 ) -> tuple[RewindRuntime, WorkMetrics]:
     if mode not in ("targeted", "naive"):
         raise ValueError(mode)
@@ -33,6 +34,7 @@ def measure_repair(
         seed=seed,
         extra_unrelated=extra_unrelated,
         extra_related_claims=extra_related_claims,
+        extra_unrelated_claims=extra_unrelated_claims,
     )
     rt.ingest_and_propose(fixture)
     before = {r.id: (r.status, r.updated_at) for r in rt.store.all_objects()}
@@ -100,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--extra-unrelated", type=int, default=0)
     p.add_argument("--extra-related", type=int, default=0)
+    p.add_argument("--extra-unrelated-claims", type=int, default=0)
     p.add_argument("--json", action="store_true")
     p.add_argument("--dir", type=Path, default=None)
     args = p.parse_args(argv)
@@ -113,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
             "seed": args.seed,
             "extra_unrelated": args.extra_unrelated,
             "extra_related_claims": args.extra_related,
+            "extra_unrelated_claims": args.extra_unrelated_claims,
         }
         t_rt, t_m = measure_repair(
             base / "targeted.sqlite", mode="targeted", **kwargs
