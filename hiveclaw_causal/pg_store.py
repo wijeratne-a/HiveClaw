@@ -14,6 +14,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .lease_policy import (
+    LEASE_TTL_CEILING_S,
+    LEASE_TTL_DEFAULT_S,
+    LEASE_TTL_TRIGGER_SLACK_S,
+    clamp_lease_ttl_s,
+    configured_max_ttl_s,
+)
 from .store import (
     _index_pair,
     _json,
@@ -56,8 +63,15 @@ def new_schema_name(prefix: str = "hc") -> str:
     return raw
 
 
-def locator_json(dsn: str, schema: str) -> str:
-    return json.dumps({"dsn": dsn, "schema": schema}, separators=(",", ":"))
+def locator_json(
+    dsn: str,
+    schema: str,
+    max_lease_ttl_s: float | None = None,
+) -> str:
+    spec: dict[str, Any] = {"dsn": dsn, "schema": schema}
+    if max_lease_ttl_s is not None:
+        spec["max_lease_ttl_s"] = max_lease_ttl_s
+    return json.dumps(spec, separators=(",", ":"))
 
 
 def _check_schema(name: str) -> str:
@@ -69,13 +83,20 @@ def _check_schema(name: str) -> str:
 class PgStore:
     """Duck-types Store. `db_path` is a label for logs, not a file."""
 
-    def __init__(self, dsn: str, *, schema: str = "public") -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        schema: str = "public",
+        max_lease_ttl_s: float | None = None,
+    ) -> None:
         require_psycopg()
         assert psycopg is not None
         assert dict_row is not None
         self.dsn = dsn
         self.schema = _check_schema(schema)
         self.db_path = Path(f"pg:{self.schema}")
+        self.max_lease_ttl_s = configured_max_ttl_s(max_lease_ttl_s)
         self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
         self._ensure_schema()
         if not self._schema_ready():
@@ -90,6 +111,8 @@ class PgStore:
                     "SELECT pg_advisory_unlock(872341, hashtext(%s))",
                     (self.schema,),
                 )
+        self._ensure_lease_schema()
+        self._write_lease_config()
 
     def close(self) -> None:
         self._conn.close()
@@ -200,6 +223,83 @@ class PgStore:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_objects_kind_status ON objects(kind, status)"
         )
+
+    def _lease_schema_ready(self) -> bool:
+        row = self._conn.execute(
+            "SELECT to_regclass(%s) AS rel",
+            (f"{self.schema}.lease_config",),
+        ).fetchone()
+        return row is not None and row["rel"] is not None
+
+    def _ensure_lease_schema(self) -> None:
+        if self._lease_schema_ready():
+            return
+        self._conn.execute(
+            "SELECT pg_advisory_lock(872342, hashtext(%s))", (self.schema,)
+        )
+        try:
+            if self._lease_schema_ready():
+                return
+            self._conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS lease_config (
+                  key TEXT PRIMARY KEY,
+                  value DOUBLE PRECISION NOT NULL CHECK (value > 0 AND value <= {LEASE_TTL_CEILING_S})
+                )
+                """
+            )
+            self._conn.execute(
+                f"""
+                CREATE OR REPLACE FUNCTION hiveclaw_lease_until_ceiling()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                BEGIN
+                  IF NEW.kind = 'task'
+                     AND (NEW.payload::json->>'lease_until') IS NOT NULL
+                     AND (NEW.payload::json->>'lease_until')::float
+                         > (extract(epoch from now()) + {LEASE_TTL_CEILING_S} + {LEASE_TTL_TRIGGER_SLACK_S})
+                  THEN
+                    RAISE EXCEPTION 'lease_until exceeds absolute TTL ceiling';
+                  END IF;
+                  RETURN NEW;
+                END;
+                $$
+                """
+            )
+            self._conn.execute(
+                "DROP TRIGGER IF EXISTS lease_until_absolute_ceiling ON objects"
+            )
+            self._conn.execute(
+                """
+                CREATE TRIGGER lease_until_absolute_ceiling
+                BEFORE INSERT OR UPDATE ON objects
+                FOR EACH ROW
+                EXECUTE PROCEDURE hiveclaw_lease_until_ceiling()
+                """
+            )
+        finally:
+            self._conn.execute(
+                "SELECT pg_advisory_unlock(872342, hashtext(%s))",
+                (self.schema,),
+            )
+
+    def _write_lease_config(self) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO lease_config(key, value) VALUES ('max_ttl_s', %s)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """,
+            (self.max_lease_ttl_s,),
+        )
+
+    def _clamp_ttl(self, requested: float) -> float:
+        row = self._conn.execute(
+            "SELECT value FROM lease_config WHERE key = 'max_ttl_s'"
+        ).fetchone()
+        db_max = float(row["value"]) if row is not None else self.max_lease_ttl_s
+        cap = min(db_max, self.max_lease_ttl_s, LEASE_TTL_CEILING_S)
+        return clamp_lease_ttl_s(requested, max_ttl_s=cap)
 
     def append_event(
         self,
@@ -453,10 +553,11 @@ class PgStore:
         worker_id: str,
         ts: str,
         *,
-        lease_ttl_s: float = 30.0,
+        lease_ttl_s: float = LEASE_TTL_DEFAULT_S,
     ) -> Record | None:
         now = time.time()
-        lease_until = now + lease_ttl_s
+        ttl = self._clamp_ttl(lease_ttl_s)
+        lease_until = now + ttl
         with self._conn.transaction():
             row = self._conn.execute(
                 """
@@ -543,10 +644,11 @@ class PgStore:
         worker_id: str,
         ts: str,
         *,
-        lease_ttl_s: float = 30.0,
+        lease_ttl_s: float = LEASE_TTL_DEFAULT_S,
     ) -> Record:
         now = time.time()
-        lease_until = now + lease_ttl_s
+        ttl = self._clamp_ttl(lease_ttl_s)
+        lease_until = now + ttl
         with self._conn.transaction():
             rec = self.get(task_id)
             if rec.kind != ObjectKind.TASK:

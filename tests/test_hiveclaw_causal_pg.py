@@ -356,6 +356,67 @@ class TestPostgresNetworkedRewind(unittest.TestCase):
         proxy.close()
         td.cleanup()
 
+    def test_oversized_ttl_tcp_drop_is_reclaimed_within_ceiling(self) -> None:
+        """Client asks for 3600s; after TCP drop, reclaim within the 1s store ceiling."""
+        u = urlparse(self.dsn)
+        host = u.hostname or "127.0.0.1"
+        port = int(u.port or 5432)
+        proxy = TcpProxy(host, port)
+        listen = proxy.start()
+        pdsn = _proxy_dsn(self.dsn, listen)
+        schema = new_schema_name("strand")
+        PgStore(pdsn, schema=schema, max_lease_ttl_s=1.0).close()
+        loc = locator_json(pdsn, schema, max_lease_ttl_s=1.0)
+        expected = _seed_pending_tasks(loc, 1)
+        tid = expected[0]
+        td = tempfile.TemporaryDirectory()
+        ready = Path(td.name) / "ready"
+        fail = Path(td.name) / "fail"
+        ctx = multiprocessing.get_context("spawn")
+        p = ctx.Process(
+            target=hold_lease_renew_until_fail,
+            args=((loc, "cut", 3600.0, str(ready), str(fail)),),
+        )
+        p.start()
+        deadline = time.time() + 8.0
+        while time.time() < deadline and not ready.exists():
+            time.sleep(0.01)
+        self.assertTrue(ready.exists(), "worker never leased through proxy")
+        watch = open_store(locator_json(self.dsn, schema, max_lease_ttl_s=1.0))
+        try:
+            rec = watch.get(tid)
+            remaining = float(rec.payload["lease_until"]) - time.time()
+            self.assertLessEqual(
+                remaining, 1.5, f"client 3600s TTL was honored: {remaining:.1f}s left"
+            )
+        finally:
+            watch.close()
+        self.assertTrue(p.is_alive())
+        proxy.drop_all()
+        deadline = time.time() + 8.0
+        while time.time() < deadline and not fail.exists():
+            time.sleep(0.02)
+        self.assertTrue(fail.exists(), "renew after drop did not fail")
+        self.assertTrue(p.is_alive())
+        time.sleep(1.25)
+        survivor_loc = locator_json(self.dsn, schema, max_lease_ttl_s=1.0)
+        recovered = drain_pending_tasks(
+            survivor_loc, "survivor", pause_s=0.0, lease_ttl_s=30.0
+        )
+        self.assertEqual(recovered, [tid])
+        store = open_store(survivor_loc)
+        try:
+            rec = store.get(tid)
+            self.assertEqual(rec.status, TaskStatus.DONE.value)
+            self.assertEqual(rec.payload.get("completed_by"), "survivor")
+            self.assertEqual(rec.payload.get("reclaimed_from"), "cut")
+        finally:
+            store.close()
+        p.terminate()
+        p.join(timeout=3)
+        proxy.close()
+        td.cleanup()
+
     def test_proxy_stall_longer_than_ttl_false_reclaims_live_worker(self) -> None:
         """Heartbeat delayed by a stall (not death) is treated as silence."""
         u = urlparse(self.dsn)
@@ -388,7 +449,7 @@ class TestPostgresNetworkedRewind(unittest.TestCase):
                     break
                 time.sleep(0.01)
             self.assertTrue(saw, "slow worker never leased through proxy")
-            proxy.stall(0.45)
+            proxy.stall(0.7)
             stolen = watch.try_lease_one_task("poacher", "2026-08-31T00:00:01Z", lease_ttl_s=30.0)
             self.assertIsNotNone(stolen, "expected false-reclaim after stall > TTL")
             assert stolen is not None

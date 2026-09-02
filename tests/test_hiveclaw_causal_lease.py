@@ -23,6 +23,7 @@ from hiveclaw_causal.lease import (  # noqa: E402
     mp_drain_until_idle,
     work_slow_with_renew,
 )
+from hiveclaw_causal.lease_policy import LEASE_TTL_CEILING_S  # noqa: E402
 from hiveclaw_causal.rewind import RewindRuntime  # noqa: E402
 from hiveclaw_causal.store import Store  # noqa: E402
 from hiveclaw_causal.types import (  # noqa: E402
@@ -147,6 +148,55 @@ class TestConcurrentLeases(unittest.TestCase):
                 store.close()
         self.assertEqual(double, 0, "double-lease trials")
         self.assertEqual(dropped, 0, "dropped-task trials")
+
+    def test_oversized_client_ttl_does_not_strand_after_silence(self) -> None:
+        """A client-requested hour-long TTL must not make a silent owner unrecoverable.
+
+        Session 7: TCP death does not release a lease. If the client can set
+        lease_until arbitrarily far in the future, a dropped path strands the
+        task. Desired: store clamps TTL; after the ceiling (1s here) a survivor
+        reclaims. Client still asks for 3600s.
+        """
+        db = self.dir / "strand.sqlite"
+        expected = _seed_pending_tasks(db, 1)
+        tid = expected[0]
+        store = Store(db, max_lease_ttl_s=1.0)
+        rec = store.try_lease_one_task(
+            "stranded", "2026-08-31T00:00:00Z", lease_ttl_s=3600.0
+        )
+        self.assertIsNotNone(rec)
+        assert rec is not None
+        remaining = float(rec.payload["lease_until"]) - time.time()
+        self.assertLessEqual(remaining, 1.5, f"client 3600s TTL was honored: {remaining:.1f}s left")
+        store.close()
+
+        time.sleep(1.25)
+        recovered = drain_pending_tasks(
+            str(db), "survivor", pause_s=0.0, lease_ttl_s=30.0
+        )
+        self.assertEqual(recovered, [tid])
+        store = Store(db)
+        try:
+            rec = store.get(tid)
+            self.assertEqual(rec.status, TaskStatus.DONE.value)
+            self.assertEqual(rec.payload.get("completed_by"), "survivor")
+            self.assertEqual(rec.payload.get("reclaimed_from"), "stranded")
+        finally:
+            store.close()
+
+    def test_infinite_client_ttl_is_clamped_to_absolute_ceiling(self) -> None:
+        db = self.dir / "inf.sqlite"
+        _seed_pending_tasks(db, 1)
+        store = Store(db)
+        rec = store.try_lease_one_task(
+            "w", "2026-08-31T00:00:00Z", lease_ttl_s=float("inf")
+        )
+        self.assertIsNotNone(rec)
+        assert rec is not None
+        remaining = float(rec.payload["lease_until"]) - time.time()
+        self.assertLessEqual(remaining, LEASE_TTL_CEILING_S + 0.5)
+        self.assertGreater(remaining, LEASE_TTL_CEILING_S - 2.0)
+        store.close()
 
     def test_killed_worker_lease_is_reclaimed(self) -> None:
         db = self.dir / "crash.sqlite"

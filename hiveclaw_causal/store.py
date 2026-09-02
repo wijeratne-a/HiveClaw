@@ -8,6 +8,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .lease_policy import (
+    LEASE_TTL_CEILING_S,
+    LEASE_TTL_DEFAULT_S,
+    LEASE_TTL_TRIGGER_SLACK_S,
+    clamp_lease_ttl_s,
+    configured_max_ttl_s,
+)
 from .types import (
     CausalEvent,
     Edge,
@@ -90,7 +97,12 @@ def open_store(locator: str) -> Store:
         spec = json.loads(locator)
         from .pg_store import PgStore
 
-        return PgStore(str(spec["dsn"]), schema=str(spec["schema"]))  # type: ignore[return-value]
+        max_ttl = spec.get("max_lease_ttl_s")
+        return PgStore(  # type: ignore[return-value]
+            str(spec["dsn"]),
+            schema=str(spec["schema"]),
+            max_lease_ttl_s=None if max_ttl is None else float(max_ttl),
+        )
     if locator.startswith("postgres"):
         from .pg_store import PgStore
 
@@ -99,14 +111,21 @@ def open_store(locator: str) -> Store:
 
 
 class Store:
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(
+        self,
+        db_path: Path | str,
+        *,
+        max_lease_ttl_s: float | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.max_lease_ttl_s = configured_max_ttl_s(max_lease_ttl_s)
         self._conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=8000")
         self._init_schema()
+        self._write_lease_config()
 
     def close(self) -> None:
         self._conn.close()
@@ -114,7 +133,7 @@ class Store:
     def _init_schema(self) -> None:
         cur = self._conn.cursor()
         cur.executescript(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS events (
               seq INTEGER PRIMARY KEY AUTOINCREMENT,
               ts TEXT NOT NULL,
@@ -167,9 +186,48 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_reverse_target ON reverse_deps(target_id);
             CREATE INDEX IF NOT EXISTS idx_events_object ON events(object_id);
             CREATE INDEX IF NOT EXISTS idx_objects_kind_status ON objects(kind, status);
+            CREATE TABLE IF NOT EXISTS lease_config (
+              key TEXT PRIMARY KEY,
+              value REAL NOT NULL CHECK (value > 0 AND value <= {LEASE_TTL_CEILING_S})
+            );
+            CREATE TRIGGER IF NOT EXISTS lease_until_absolute_ceiling_update
+            BEFORE UPDATE ON objects
+            FOR EACH ROW
+            WHEN NEW.kind = 'task'
+             AND json_extract(NEW.payload, '$.lease_until') IS NOT NULL
+             AND CAST(json_extract(NEW.payload, '$.lease_until') AS REAL)
+                 > (CAST(strftime('%s', 'now') AS REAL) + {LEASE_TTL_CEILING_S} + {LEASE_TTL_TRIGGER_SLACK_S})
+            BEGIN
+              SELECT RAISE(ABORT, 'lease_until exceeds absolute TTL ceiling');
+            END;
+            CREATE TRIGGER IF NOT EXISTS lease_until_absolute_ceiling_insert
+            BEFORE INSERT ON objects
+            FOR EACH ROW
+            WHEN NEW.kind = 'task'
+             AND json_extract(NEW.payload, '$.lease_until') IS NOT NULL
+             AND CAST(json_extract(NEW.payload, '$.lease_until') AS REAL)
+                 > (CAST(strftime('%s', 'now') AS REAL) + {LEASE_TTL_CEILING_S} + {LEASE_TTL_TRIGGER_SLACK_S})
+            BEGIN
+              SELECT RAISE(ABORT, 'lease_until exceeds absolute TTL ceiling');
+            END;
             """
         )
         self._conn.commit()
+
+    def _write_lease_config(self) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO lease_config(key, value) VALUES ('max_ttl_s', ?)",
+            (self.max_lease_ttl_s,),
+        )
+        self._conn.commit()
+
+    def _clamp_ttl(self, requested: float) -> float:
+        row = self._conn.execute(
+            "SELECT value FROM lease_config WHERE key = 'max_ttl_s'"
+        ).fetchone()
+        db_max = float(row["value"]) if row is not None else self.max_lease_ttl_s
+        cap = min(db_max, self.max_lease_ttl_s, LEASE_TTL_CEILING_S)
+        return clamp_lease_ttl_s(requested, max_ttl_s=cap)
 
     def append_event(
         self,
@@ -427,15 +485,17 @@ class Store:
         worker_id: str,
         ts: str,
         *,
-        lease_ttl_s: float = 30.0,
+        lease_ttl_s: float = LEASE_TTL_DEFAULT_S,
     ) -> Record | None:
         """Atomically lease one pending task, or reclaim one expired lease.
 
         Workers share only this SQLite file. `lease_until` is unix seconds so
         sub-second TTLs work (object `ts` strings are 1s resolution).
+        Requested TTL is clamped to this store's max and LEASE_TTL_CEILING_S.
         """
         now = time.time()
-        lease_until = now + lease_ttl_s
+        ttl = self._clamp_ttl(lease_ttl_s)
+        lease_until = now + ttl
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             row = self._conn.execute(
@@ -528,11 +588,12 @@ class Store:
         worker_id: str,
         ts: str,
         *,
-        lease_ttl_s: float = 30.0,
+        lease_ttl_s: float = LEASE_TTL_DEFAULT_S,
     ) -> Record:
         """Extend lease_until for the current owner. No-op event (heartbeat is frequent)."""
         now = time.time()
-        lease_until = now + lease_ttl_s
+        ttl = self._clamp_ttl(lease_ttl_s)
+        lease_until = now + ttl
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             rec = self.get(task_id)
