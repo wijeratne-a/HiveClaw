@@ -100,3 +100,25 @@ def lease_one_and_die(payload: tuple[str, str, float]) -> None:
     finally:
         store.close()
     os.kill(os.getpid(), signal.SIGKILL)
+
+
+def work_slow_with_renew(payload: tuple[str, str, float, float, float]) -> None:
+    """Hold a lease longer than TTL while renewing; then complete. Must stay owner."""
+    db_path, worker_id, lease_ttl_s, work_s, renew_every_s = payload
+    store = Store(db_path)
+    try:
+        rec = store.try_lease_one_task(
+            worker_id, _ts(), lease_ttl_s=lease_ttl_s
+        )
+        if rec is None:
+            raise RuntimeError("no task to lease")
+        deadline = time.time() + work_s
+        while time.time() < deadline:
+            store.renew_lease(
+                rec.id, worker_id, _ts(), lease_ttl_s=lease_ttl_s
+            )
+            remaining = deadline - time.time()
+            time.sleep(max(0.0, min(renew_every_s, remaining)))
+        store.complete_task(rec.id, worker_id, _ts())
+    finally:
+        store.close()

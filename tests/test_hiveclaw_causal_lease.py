@@ -21,6 +21,7 @@ from hiveclaw_causal.lease import (  # noqa: E402
     lease_one_and_die,
     mp_drain,
     mp_drain_until_idle,
+    work_slow_with_renew,
 )
 from hiveclaw_causal.rewind import RewindRuntime  # noqa: E402
 from hiveclaw_causal.store import Store  # noqa: E402
@@ -206,6 +207,60 @@ class TestConcurrentLeases(unittest.TestCase):
                 if e.event_type == "lease_reclaim"
             ]
             self.assertTrue(reclaim_evs, "expected lease_reclaim event")
+        finally:
+            store.close()
+
+    def test_slow_alive_worker_that_renews_is_not_reclaimed(self) -> None:
+        """Wall-clock past TTL is not enough: a live worker that heartbeats keeps the lease."""
+        db = self.dir / "slow.sqlite"
+        expected = _seed_pending_tasks(db, 1)
+        tid = expected[0]
+        ttl_s = 0.2
+        work_s = 0.7
+        ctx = multiprocessing.get_context("spawn")
+        p = ctx.Process(
+            target=work_slow_with_renew,
+            args=((str(db), "slow", ttl_s, work_s, 0.05),),
+        )
+        p.start()
+        deadline = time.time() + 8.0
+        saw = False
+        while time.time() < deadline:
+            store = Store(db)
+            try:
+                rec = store.get(tid)
+                if rec.status == TaskStatus.LEASED.value and rec.payload.get("lease_owner") == "slow":
+                    saw = True
+                    break
+            finally:
+                store.close()
+            time.sleep(0.01)
+        self.assertTrue(saw, "slow worker never leased")
+
+        time.sleep(ttl_s + 0.2)
+        store = Store(db)
+        try:
+            stolen = store.try_lease_one_task("poacher", "2026-08-31T00:00:01Z", lease_ttl_s=30.0)
+            self.assertIsNone(stolen, "slow-but-alive lease was reclaimed")
+            rec = store.get(tid)
+            self.assertEqual(rec.status, TaskStatus.LEASED.value)
+            self.assertEqual(rec.payload.get("lease_owner"), "slow")
+        finally:
+            store.close()
+
+        p.join(timeout=5)
+        self.assertEqual(p.exitcode, 0)
+
+        store = Store(db)
+        try:
+            rec = store.get(tid)
+            self.assertEqual(rec.status, TaskStatus.DONE.value)
+            self.assertEqual(rec.payload.get("completed_by"), "slow")
+            self.assertIsNone(rec.payload.get("reclaimed_from"))
+            reclaim_evs = [
+                e for e in store.events_for(tid) if e.event_type == "lease_reclaim"
+            ]
+            self.assertEqual(reclaim_evs, [])
         finally:
             store.close()
 

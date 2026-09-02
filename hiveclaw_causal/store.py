@@ -505,6 +505,51 @@ class Store:
             self._conn.rollback()
             raise
 
+    def renew_lease(
+        self,
+        task_id: str,
+        worker_id: str,
+        ts: str,
+        *,
+        lease_ttl_s: float = 30.0,
+    ) -> Record:
+        """Extend lease_until for the current owner. No-op event (heartbeat is frequent)."""
+        now = time.time()
+        lease_until = now + lease_ttl_s
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            rec = self.get(task_id)
+            if rec.kind != ObjectKind.TASK:
+                self._conn.rollback()
+                raise ValueError(f"{task_id} is not a task")
+            if rec.status != TaskStatus.LEASED.value:
+                self._conn.rollback()
+                raise ValueError(f"{task_id} status {rec.status} is not leased")
+            if rec.payload.get("lease_owner") != worker_id:
+                self._conn.rollback()
+                raise ValueError(
+                    f"{task_id} owned by {rec.payload.get('lease_owner')} not {worker_id}"
+                )
+            payload = {**rec.payload, "lease_until": lease_until}
+            cur = self._conn.execute(
+                """
+                UPDATE objects SET payload = ?, updated_at = ?
+                WHERE id = ? AND status = ?
+                  AND json_extract(payload, '$.lease_owner') = ?
+                """,
+                (_json(payload), ts, task_id, TaskStatus.LEASED.value, worker_id),
+            )
+            if cur.rowcount != 1:
+                self._conn.rollback()
+                raise RuntimeError(f"lost lease on {task_id} during renew")
+            self._conn.commit()
+            rec.payload = payload
+            rec.updated_at = ts
+            return rec
+        except Exception:
+            self._conn.rollback()
+            raise
+
     def complete_task(self, task_id: str, worker_id: str, ts: str) -> Record:
         rec = self.get(task_id)
         if rec.kind != ObjectKind.TASK:
