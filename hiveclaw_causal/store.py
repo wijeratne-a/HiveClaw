@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -398,24 +399,61 @@ class Store:
         rows = self._conn.execute("SELECT * FROM events ORDER BY seq").fetchall()
         return [self._row_to_event(r) for r in rows]
 
-    def try_lease_one_task(self, worker_id: str, ts: str) -> Record | None:
-        """Atomically lease one pending task. Workers share only this SQLite file."""
+    def try_lease_one_task(
+        self,
+        worker_id: str,
+        ts: str,
+        *,
+        lease_ttl_s: float = 30.0,
+    ) -> Record | None:
+        """Atomically lease one pending task, or reclaim one expired lease.
+
+        Workers share only this SQLite file. `lease_until` is unix seconds so
+        sub-second TTLs work (object `ts` strings are 1s resolution).
+        """
+        now = time.time()
+        lease_until = now + lease_ttl_s
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             row = self._conn.execute(
                 """
                 SELECT * FROM objects
-                WHERE kind = ? AND status = ?
-                ORDER BY id
+                WHERE kind = ?
+                  AND (
+                    status = ?
+                    OR (
+                      status = ?
+                      AND json_extract(payload, '$.lease_until') IS NOT NULL
+                      AND CAST(json_extract(payload, '$.lease_until') AS REAL) < ?
+                    )
+                  )
+                ORDER BY CASE status WHEN ? THEN 0 ELSE 1 END, id
                 LIMIT 1
                 """,
-                (ObjectKind.TASK.value, TaskStatus.PENDING.value),
+                (
+                    ObjectKind.TASK.value,
+                    TaskStatus.PENDING.value,
+                    TaskStatus.LEASED.value,
+                    now,
+                    TaskStatus.PENDING.value,
+                ),
             ).fetchone()
             if row is None:
                 self._conn.rollback()
                 return None
             rec = self._row_to_record(row)
-            payload = {**rec.payload, "lease_owner": worker_id}
+            previous_owner = rec.payload.get("lease_owner")
+            reclaim = rec.status == TaskStatus.LEASED.value
+            payload = {
+                **rec.payload,
+                "lease_owner": worker_id,
+                "lease_until": lease_until,
+            }
+            if reclaim:
+                payload["reclaimed_from"] = previous_owner
+            cas_status = (
+                TaskStatus.LEASED.value if reclaim else TaskStatus.PENDING.value
+            )
             cur = self._conn.execute(
                 """
                 UPDATE objects SET status = ?, payload = ?, updated_at = ?
@@ -426,20 +464,30 @@ class Store:
                     _json(payload),
                     ts,
                     rec.id,
-                    TaskStatus.PENDING.value,
+                    cas_status,
                 ),
             )
             if cur.rowcount != 1:
                 self._conn.rollback()
                 return None
+            event_type = "lease_reclaim" if reclaim else "lease_task"
+            reason = (
+                f"reclaimed by {worker_id} from {previous_owner}"
+                if reclaim
+                else f"leased by {worker_id}"
+            )
             self.append_event(
                 ts=ts,
-                event_type="lease_task",
+                event_type=event_type,
                 object_id=rec.id,
-                reason=f"leased by {worker_id}",
-                old_status=TaskStatus.PENDING.value,
+                reason=reason,
+                old_status=cas_status,
                 new_status=TaskStatus.LEASED.value,
-                payload={"lease_owner": worker_id},
+                payload={
+                    "lease_owner": worker_id,
+                    "lease_until": lease_until,
+                    "reclaimed": reclaim,
+                },
                 commit=False,
             )
             self._conn.commit()

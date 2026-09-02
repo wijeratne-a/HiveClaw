@@ -6,6 +6,7 @@ from __future__ import annotations
 import multiprocessing
 import sys
 import tempfile
+import time
 import unittest
 from collections import Counter
 from pathlib import Path
@@ -15,7 +16,12 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from hiveclaw_causal.fixture import build_rewind_fixture  # noqa: E402
-from hiveclaw_causal.lease import mp_drain  # noqa: E402
+from hiveclaw_causal.lease import (  # noqa: E402
+    drain_pending_tasks,
+    lease_one_and_die,
+    mp_drain,
+    mp_drain_until_idle,
+)
 from hiveclaw_causal.rewind import RewindRuntime  # noqa: E402
 from hiveclaw_causal.store import Store  # noqa: E402
 from hiveclaw_causal.types import (  # noqa: E402
@@ -30,11 +36,11 @@ from hiveclaw_causal.types import (  # noqa: E402
 from hiveclaw_causal.util import content_hash  # noqa: E402
 
 
-def _seed_pending_tasks(db_path: Path, n: int) -> list[str]:
+def _seed_pending_tasks(db_path: Path, n: int, start: int = 0) -> list[str]:
     store = Store(db_path)
     ids: list[str] = []
     ts = "2026-08-31T00:00:00Z"
-    for i in range(n):
+    for i in range(start, start + n):
         tid = f"task-lease-{i:04d}"
         payload = {"kind": "synthetic", "i": i}
         rec = Record(
@@ -140,6 +146,99 @@ class TestConcurrentLeases(unittest.TestCase):
                 store.close()
         self.assertEqual(double, 0, "double-lease trials")
         self.assertEqual(dropped, 0, "dropped-task trials")
+
+    def test_killed_worker_lease_is_reclaimed(self) -> None:
+        db = self.dir / "crash.sqlite"
+        expected = _seed_pending_tasks(db, 1)
+        tid = expected[0]
+        ttl_s = 0.25
+        ctx = multiprocessing.get_context("spawn")
+        p = ctx.Process(
+            target=lease_one_and_die,
+            args=((str(db), "crasher", ttl_s),),
+        )
+        p.start()
+        deadline = time.time() + 8.0
+        saw_crasher_lease = False
+        while time.time() < deadline:
+            store = Store(db)
+            try:
+                rec = store.get(tid)
+                if (
+                    rec.status == TaskStatus.LEASED.value
+                    and rec.payload.get("lease_owner") == "crasher"
+                ):
+                    saw_crasher_lease = True
+                    break
+            finally:
+                store.close()
+            if not p.is_alive() and not saw_crasher_lease:
+                time.sleep(0.01)
+                continue
+            time.sleep(0.01)
+        p.join(timeout=3)
+        self.assertTrue(saw_crasher_lease, "crasher never committed a lease")
+        self.assertNotEqual(p.exitcode, 0)
+
+        store = Store(db)
+        try:
+            rec = store.get(tid)
+            self.assertEqual(rec.status, TaskStatus.LEASED.value)
+            self.assertEqual(rec.payload.get("lease_owner"), "crasher")
+        finally:
+            store.close()
+
+        time.sleep(ttl_s + 0.15)
+        recovered = drain_pending_tasks(
+            str(db), "survivor", pause_s=0.0, lease_ttl_s=30.0
+        )
+        self.assertEqual(recovered, [tid])
+
+        store = Store(db)
+        try:
+            rec = store.get(tid)
+            self.assertEqual(rec.status, TaskStatus.DONE.value)
+            self.assertEqual(rec.payload.get("completed_by"), "survivor")
+            self.assertEqual(rec.payload.get("reclaimed_from"), "crasher")
+            reclaim_evs = [
+                e
+                for e in store.events_for(tid)
+                if e.event_type == "lease_reclaim"
+            ]
+            self.assertTrue(reclaim_evs, "expected lease_reclaim event")
+        finally:
+            store.close()
+
+    def test_continuous_insert_while_workers_drain(self) -> None:
+        """Producer inserts while workers drain; not a pre-seeded one-shot queue."""
+        db = self.dir / "churn.sqlite"
+        n_tasks = 24
+        n_workers = 3
+        ctx = multiprocessing.get_context("spawn")
+        stop_path = self.dir / "churn.stop"
+        jobs = [
+            (str(db), f"worker-{i}", 0.002, str(stop_path)) for i in range(n_workers)
+        ]
+        with ctx.Pool(processes=n_workers) as pool:
+            async_result = pool.map_async(mp_drain_until_idle, jobs)
+            expected: list[str] = []
+            for i in range(n_tasks):
+                expected.extend(_seed_pending_tasks(db, 1, start=i))
+                time.sleep(0.003)
+            stop_path.write_text("stop\n", encoding="utf-8")
+            results = async_result.get(timeout=30)
+
+        leased_all = [tid for _w, ids in results for tid in ids]
+        self.assertEqual(sorted(leased_all), sorted(expected), Counter(leased_all))
+        self.assertEqual(len(leased_all), len(set(leased_all)), Counter(leased_all))
+
+        store = Store(db)
+        try:
+            tasks = {t.id: t for t in store.objects_of(ObjectKind.TASK)}
+            for tid in expected:
+                self.assertEqual(tasks[tid].status, TaskStatus.DONE.value)
+        finally:
+            store.close()
 
 
 if __name__ == "__main__":

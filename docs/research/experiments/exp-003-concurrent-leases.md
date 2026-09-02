@@ -53,7 +53,7 @@ Limits: single-node SQLite, not multi-host; WAL required; `BEGIN IMMEDIATE` seri
 
 **Do not** treat this as a distributed stigmergy proof. It is a local multi-process queue test.
 
-**Revise later** if a double-lease appears under heavier load (more trials, more tasks, shorter pauses).
+**Revise later** if a double-lease appears under heavier load (more trials, more tasks, shorter pauses). Crash/expiry and insert-while-drain: `docs/research/experiments/exp-004-lease-expiry-and-churn.md`.
 
 ## Reproduction
 
