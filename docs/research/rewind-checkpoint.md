@@ -6,7 +6,7 @@ Distinguish **proven** (command ran) vs **implemented but not separately measure
 
 ## State of evidence (Session 10, 2026-09-01)
 
-HEAD: `ff4b146e65f10407d3b3552ce3a9a2328faf1afa` on `origin/main` (Session 9 operator tooling). CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33596227872 (`test-causal` success on that SHA). Interpreter: `.venv/bin/python` 3.11.1.
+HEAD described here: `251147c930e66c1e2a8250448bede87dc7d01d59` (Session 10 reconciliation docs; Session 9 code is parent `ff4b146e65f10407d3b3552ce3a9a2328faf1afa`). Causal runtime on that SHA: https://github.com/wijeratne-a/HiveClaw/actions/runs/33596401366 (`test-causal` success). Session 9 code CI: https://github.com/wijeratne-a/HiveClaw/actions/runs/33596227872. Interpreter: `.venv/bin/python` 3.11.1. Confirm the tip with `git ls-remote origin refs/heads/main` — a later docs-only CI-record commit may sit on top of `251147c` without changing causal code.
 
 Session 10 is documentation reconciliation after `docs/research/independent-audit-2026-09-01.md`. It does not change causal math. Historical session SHAs/run IDs below are left as they were for those sessions (verified 2026-09-01: they still resolve).
 
@@ -86,7 +86,7 @@ Independent audit: `docs/research/independent-audit-2026-09-01.md`. Causal core 
 | Item | Action |
 |------|--------|
 | Session 9 on `origin/main` | Commit `ff4b146`. CI https://github.com/wijeratne-a/HiveClaw/actions/runs/33596227872 success. |
-| Checkpoint HEAD / run ID | Banner updated from stale `f4496ee` / 33582036614 (that pair remains valid **for Session 8 docs** `f4496ee`). |
+| Checkpoint HEAD / run ID | Banner names `251147c` / 33596401366 (Session 10 docs). Session 9 code `ff4b146` / 33596227872. Historical `f4496ee` / 33582036614 remains valid **for Session 8 docs**. |
 | exp-001 / exp-002 drift | Addenda only; original tables kept. |
 | architecture-map / gap-analysis | Written now as current-state docs (they had never existed). |
 | Rewind GUI | Descoped; section above. |

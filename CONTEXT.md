@@ -301,6 +301,7 @@ Other branch (not checked out): `feat/llm-swarm-integration`.
 ### 2026-09-01 — Session 10 reconcile independent audit
 
 - Session 9 operator tooling pushed: `ff4b146`. CI https://github.com/wijeratne-a/HiveClaw/actions/runs/33596227872 success.
+- Session 10 docs: `251147c`. CI https://github.com/wijeratne-a/HiveClaw/actions/runs/33596401366 success.
 - Checkpoint banner SHA/run ID updated. exp-001/002 addenda (tables not overwritten). architecture-map + gap-analysis written as current state. Rewind GUI descoped.
 - Demo WIP left unstaged.
 
